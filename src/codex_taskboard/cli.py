@@ -117,6 +117,34 @@ from codex_taskboard.followup_runtime import (
     should_schedule_followup_for_spec as should_schedule_followup_for_spec_impl,
     sync_followup_state as sync_followup_state_impl,
 )
+from codex_taskboard.session_runtime import (
+    SessionRuntimeHooks,
+    active_codex_resume_pids_for_session as active_codex_resume_pids_for_session_impl,
+    allow_local_rollout_fallback as allow_local_rollout_fallback_impl,
+    build_deferred_resume_result as build_deferred_resume_result_impl,
+    classify_platform_error as classify_platform_error_impl,
+    command_runtime_result_fields as command_runtime_result_fields_impl,
+    continue_retry_error_kind as continue_retry_error_kind_impl,
+    default_retry_delay_seconds as default_retry_delay_seconds_impl,
+    extract_codex_session_id as extract_codex_session_id_impl,
+    extract_last_assistant_message_from_rollout as extract_last_assistant_message_from_rollout_impl,
+    extract_taskboard_signal as extract_taskboard_signal_impl,
+    extract_text_from_message_content as extract_text_from_message_content_impl,
+    is_rate_limit_retry_error as is_rate_limit_retry_error_impl,
+    is_session_busy_error as is_session_busy_error_impl,
+    latest_local_assistant_message_for_session as latest_local_assistant_message_for_session_impl,
+    latest_local_rollout_output_snapshot as latest_local_rollout_output_snapshot_impl,
+    latest_session_activity_ts as latest_session_activity_ts_impl,
+    platform_error_deferred_reason as platform_error_deferred_reason_impl,
+    platform_error_from_reason as platform_error_from_reason_impl,
+    platform_error_result_fields as platform_error_result_fields_impl,
+    platform_error_retry_after_seconds as platform_error_retry_after_seconds_impl,
+    platform_error_spec_for_kind as platform_error_spec_for_kind_impl,
+    retry_after_seconds_from_target as retry_after_seconds_from_target_impl,
+    rollout_candidates_for_session as rollout_candidates_for_session_impl,
+    session_busy_retry_after_seconds as session_busy_retry_after_seconds_impl,
+    session_output_busy_snapshot as session_output_busy_snapshot_impl,
+)
 from codex_taskboard.api_submit import (
     ApiSubmitHooks,
     apply_api_token_submit_policy as apply_api_token_submit_policy_impl,
@@ -4609,6 +4637,32 @@ def followup_runtime_hooks() -> FollowupRuntimeHooks:
     )
 
 
+def session_runtime_hooks() -> SessionRuntimeHooks:
+    return SessionRuntimeHooks(
+        find_thread_info=find_thread_info,
+        should_use_executor_codex=should_use_executor_codex,
+        latest_remote_session_activity_ts=latest_remote_session_activity_ts,
+        parse_timestamp_to_unix=parse_timestamp_to_unix,
+        read_pid_cmdline=read_pid_cmdline,
+        active_feedback_entries_for_session=active_feedback_entries_for_session,
+        canonicalize_taskboard_signal=canonicalize_taskboard_signal,
+        extract_taskboard_protocol_footer=extract_taskboard_protocol_footer,
+        list_proc_entries=lambda: list(Path("/proc").iterdir()),
+        now_ts=time.time,
+        taskboard_final_signal_values=set(TASKBOARD_FINAL_SIGNAL_VALUES),
+        rate_limit_patterns=tuple(RATE_LIMIT_PATTERNS),
+        session_busy_patterns=tuple(SESSION_BUSY_PATTERNS),
+        platform_error_signatures=tuple(PLATFORM_ERROR_SIGNATURES),
+        max_rollout_output_busy_tail_lines=MAX_ROLLOUT_OUTPUT_BUSY_TAIL_LINES,
+        default_session_output_busy_retry_seconds=DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS,
+        default_session_output_busy_open_turn_stall_seconds=DEFAULT_SESSION_OUTPUT_BUSY_OPEN_TURN_STALL_SECONDS,
+        default_platform_error_human_retry_seconds=DEFAULT_PLATFORM_ERROR_HUMAN_RETRY_SECONDS,
+        default_resume_retry_seconds=DEFAULT_RESUME_RETRY_SECONDS,
+        rollout_fallback_entry_grace_seconds=ROLLOUT_FALLBACK_ENTRY_GRACE_SECONDS,
+        rollout_fallback_mtime_grace_seconds=ROLLOUT_FALLBACK_MTIME_GRACE_SECONDS,
+    )
+
+
 def followup_key_for(spec: dict[str, Any]) -> str:
     return followup_key_for_impl(spec)
 
@@ -4705,143 +4759,35 @@ def followup_entity_info(config: AppConfig, task_id: str) -> tuple[bool, str]:
 
 
 def rollout_candidates_for_session(config: AppConfig, session_id: str) -> list[Path]:
-    thread_info = find_thread_info(config, session_id)
-    patterns = [
-        str(config.codex_home / "sessions" / "*" / "*" / "*" / f"rollout-*-{session_id}.jsonl"),
-        str(config.codex_home / "archived_sessions" / f"rollout-*-{session_id}.jsonl"),
-    ]
-    candidates: list[Path] = []
-    if thread_info is not None:
-        rollout_path = str(thread_info.get("rollout_path", "")).strip()
-        if rollout_path:
-            candidates.append(Path(rollout_path))
-    for pattern in patterns:
-        candidates.extend(Path(item) for item in glob.glob(pattern))
-    seen: set[str] = set()
-    deduped: list[Path] = []
-    for path in sorted(candidates):
-        if str(path) in seen:
-            continue
-        seen.add(str(path))
-        deduped.append(path)
-    return deduped
+    return rollout_candidates_for_session_impl(
+        config,
+        session_id,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def latest_session_activity_ts(config: AppConfig, session_id: str, spec: dict[str, Any] | None = None) -> float:
-    if should_use_executor_codex(spec):
-        return latest_remote_session_activity_ts(spec or {}, session_id)
-    latest = 0.0
-    thread_info = find_thread_info(config, session_id)
-    if thread_info is not None:
-        try:
-            latest = max(latest, float(thread_info.get("updated_at", 0) or 0))
-        except (TypeError, ValueError):
-            pass
-    for path in rollout_candidates_for_session(config, session_id):
-        try:
-            latest = max(latest, path.stat().st_mtime)
-        except FileNotFoundError:
-            continue
-    return latest
+    return latest_session_activity_ts_impl(
+        config,
+        session_id,
+        spec,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def latest_local_rollout_output_snapshot(config: AppConfig, session_id: str) -> dict[str, Any]:
-    latest_path: Path | None = None
-    latest_mtime = 0.0
-    for path in rollout_candidates_for_session(config, session_id):
-        try:
-            path_mtime = float(path.stat().st_mtime)
-        except FileNotFoundError:
-            continue
-        if latest_path is None or path_mtime >= latest_mtime:
-            latest_path = path
-            latest_mtime = path_mtime
-    snapshot = {
-        "path": str(latest_path) if latest_path is not None else "",
-        "path_mtime": latest_mtime,
-        "last_entry_ts": 0.0,
-        "last_entry_type": "",
-        "last_payload_type": "",
-        "last_turn_context_ts": 0.0,
-        "last_task_complete_ts": 0.0,
-        "last_assistant_message_ts": 0.0,
-        "turn_in_progress": False,
-    }
-    if latest_path is None:
-        return snapshot
-
-    tail_lines: deque[str] = deque(maxlen=MAX_ROLLOUT_OUTPUT_BUSY_TAIL_LINES)
-    try:
-        with latest_path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if line:
-                    tail_lines.append(line)
-    except OSError:
-        return snapshot
-
-    for raw_line in tail_lines:
-        try:
-            entry = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        entry_ts = float(parse_timestamp_to_unix(entry.get("timestamp")) or 0.0)
-        entry_type = str(entry.get("type", "")).strip()
-        if entry_ts > 0:
-            snapshot["last_entry_ts"] = entry_ts
-        if entry_type:
-            snapshot["last_entry_type"] = entry_type
-        if entry_type == "turn_context" and entry_ts > 0:
-            snapshot["last_turn_context_ts"] = max(snapshot["last_turn_context_ts"], entry_ts)
-        payload = entry.get("payload", {})
-        if not isinstance(payload, dict):
-            continue
-        payload_type = str(payload.get("type", "")).strip()
-        if payload_type:
-            snapshot["last_payload_type"] = payload_type
-        if payload_type == "task_complete" and entry_ts > 0:
-            snapshot["last_task_complete_ts"] = max(snapshot["last_task_complete_ts"], entry_ts)
-        elif payload_type == "message" and str(payload.get("role", "")).strip() == "assistant" and entry_ts > 0:
-            snapshot["last_assistant_message_ts"] = max(snapshot["last_assistant_message_ts"], entry_ts)
-
-    if snapshot["last_entry_ts"] <= 0 and latest_mtime > 0:
-        snapshot["last_entry_ts"] = latest_mtime
-    snapshot["turn_in_progress"] = bool(
-        snapshot["last_turn_context_ts"] > 0
-        and snapshot["last_turn_context_ts"] > snapshot["last_task_complete_ts"]
+    return latest_local_rollout_output_snapshot_impl(
+        config,
+        session_id,
+        hooks=session_runtime_hooks(),
     )
-    return snapshot
 
 
 def active_codex_resume_pids_for_session(session_id: str) -> list[int]:
-    normalized_session_id = str(session_id or "").strip()
-    if not normalized_session_id:
-        return []
-    matches: list[int] = []
-    proc_root = Path("/proc")
-    try:
-        proc_entries = list(proc_root.iterdir())
-    except Exception:
-        return []
-    for entry in proc_entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            pid = int(entry.name)
-        except ValueError:
-            continue
-        cmdline = read_pid_cmdline(pid)
-        if not cmdline:
-            continue
-        normalized_cmdline = f" {cmdline} "
-        if " exec resume " not in normalized_cmdline:
-            continue
-        if normalized_session_id not in normalized_cmdline:
-            continue
-        if "codex" not in normalized_cmdline:
-            continue
-        matches.append(pid)
-    return sorted(set(matches))
+    return active_codex_resume_pids_for_session_impl(
+        session_id,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def session_output_busy_snapshot(
@@ -4852,98 +4798,22 @@ def session_output_busy_snapshot(
     activity_window_seconds: int = DEFAULT_SESSION_OUTPUT_BUSY_ACTIVITY_SECONDS,
     now_ts: float | None = None,
 ) -> dict[str, Any]:
-    normalized_session_id = str(session_id or "").strip()
-    if not normalized_session_id:
-        return {
-            "busy": False,
-            "detail": "",
-            "retry_after_seconds": 0,
-            "latest_activity_ts": 0.0,
-            "rollout_snapshot": {},
-            "active_feedback_entries": [],
-            "active_resume_pids": [],
-        }
-    current_now_ts = float(now_ts if now_ts is not None else time.time())
-    active_feedback_entries = active_feedback_entries_for_session(config, normalized_session_id)
-    active_resume_pids = active_codex_resume_pids_for_session(normalized_session_id)
-    latest_activity = latest_session_activity_ts(config, normalized_session_id, spec)
-    rollout_snapshot = (
-        latest_local_rollout_output_snapshot(config, normalized_session_id)
-        if not should_use_executor_codex(spec)
-        else {}
-    )
-    rollout_last_entry_ts = float(rollout_snapshot.get("last_entry_ts", 0.0) or 0.0)
-    last_assistant_message_ts = float(rollout_snapshot.get("last_assistant_message_ts", 0.0) or 0.0)
-    last_task_complete_ts = float(rollout_snapshot.get("last_task_complete_ts", 0.0) or 0.0)
-    if rollout_last_entry_ts > 0:
-        latest_activity = max(latest_activity, rollout_last_entry_ts)
-    if last_assistant_message_ts > 0:
-        latest_activity = max(latest_activity, last_assistant_message_ts)
-    activity_age_seconds = current_now_ts - latest_activity if latest_activity else 0.0
-    recent_output_busy = bool(
-        latest_activity
-        and activity_age_seconds >= 0
-        and activity_age_seconds < max(1, int(activity_window_seconds or 0))
-    )
-    rollout_activity_age_seconds = current_now_ts - rollout_last_entry_ts if rollout_last_entry_ts else 0.0
-    assistant_message_age_seconds = (
-        current_now_ts - last_assistant_message_ts if last_assistant_message_ts else 0.0
-    )
-    assistant_message_in_open_turn = bool(
-        rollout_snapshot.get("turn_in_progress", False)
-        and last_assistant_message_ts > last_task_complete_ts
-    )
-    active_rollout_turn = bool(
-        rollout_snapshot.get("turn_in_progress", False)
-        and (
-            (
-                rollout_last_entry_ts
-                and rollout_activity_age_seconds >= 0
-                and rollout_activity_age_seconds < max(1, int(activity_window_seconds or 0))
-            )
-            or (
-                assistant_message_in_open_turn
-                and assistant_message_age_seconds >= 0
-                and assistant_message_age_seconds < DEFAULT_SESSION_OUTPUT_BUSY_OPEN_TURN_STALL_SECONDS
-            )
-            or (
-                rollout_last_entry_ts
-                and
-                str(rollout_snapshot.get("last_payload_type", "")).strip() not in {"", "message", "task_complete", "context_compacted"}
-                and rollout_activity_age_seconds < DEFAULT_SESSION_OUTPUT_BUSY_OPEN_TURN_STALL_SECONDS
-            )
+    if now_ts is not None:
+        hooks = SessionRuntimeHooks(
+            **{
+                **session_runtime_hooks().__dict__,
+                'now_ts': lambda: float(now_ts),
+            }
         )
+    else:
+        hooks = session_runtime_hooks()
+    return session_output_busy_snapshot_impl(
+        config,
+        session_id,
+        spec=spec,
+        activity_window_seconds=activity_window_seconds,
+        hooks=hooks,
     )
-    retry_after_seconds = 0
-    detail = ""
-    if active_feedback_entries:
-        detail = "active_feedback_runtime"
-        retry_after_seconds = DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS
-    elif active_resume_pids:
-        detail = "active_codex_resume_process"
-        retry_after_seconds = DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS
-    elif active_rollout_turn:
-        detail = "active_rollout_turn"
-        if rollout_activity_age_seconds < max(1, int(activity_window_seconds or 0)):
-            retry_after_seconds = retry_after_seconds_from_target(
-                rollout_last_entry_ts + max(1, int(activity_window_seconds or 1))
-            )
-        else:
-            retry_after_seconds = DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS
-    elif recent_output_busy:
-        detail = "recent_session_output"
-        retry_after_seconds = retry_after_seconds_from_target(latest_activity + max(1, int(activity_window_seconds or 1)))
-    return {
-        "busy": bool(detail),
-        "detail": detail,
-        "retry_after_seconds": max(1, int(retry_after_seconds or DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS)) if detail else 0,
-        "latest_activity_ts": latest_activity,
-        "activity_age_seconds": activity_age_seconds,
-        "rollout_snapshot": rollout_snapshot,
-        "rollout_activity_age_seconds": rollout_activity_age_seconds,
-        "active_feedback_entries": active_feedback_entries,
-        "active_resume_pids": active_resume_pids,
-    }
 
 
 def archive_task_dir(config: AppConfig, task_id: str) -> Path | None:
@@ -4962,26 +4832,11 @@ def session_lock_name(session_id: str) -> str:
 
 
 def extract_codex_session_id(text: str) -> str:
-    match = re.search(r"session id:\s*([A-Za-z0-9-]{20,})", text)
-    if match:
-        return match.group(1)
-    return ""
+    return extract_codex_session_id_impl(text)
 
 
 def extract_taskboard_signal(text: str) -> str:
-    standalone_matches = re.findall(r"(?mi)^[ \t>*`-]*TASKBOARD_SIGNAL\s*=\s*([A-Z0-9_]+)\s*[` ]*$", text or "")
-    if standalone_matches:
-        return canonicalize_taskboard_signal(standalone_matches[-1].strip())
-    inline_matches = re.findall(r"TASKBOARD_SIGNAL\s*=\s*([A-Z0-9_]+)", text or "")
-    if inline_matches:
-        return canonicalize_taskboard_signal(inline_matches[-1].strip())
-    footer_matches = re.findall(r"(?mi)^[ \t>*`-]*FINAL_SIGNAL\s*=\s*([A-Z0-9_]+|none)\s*[` ]*$", text or "")
-    if footer_matches:
-        final_signal = footer_matches[-1].strip()
-        normalized_final_signal = canonicalize_taskboard_signal(final_signal)
-        if final_signal in TASKBOARD_FINAL_SIGNAL_VALUES and final_signal != "none":
-            return normalized_final_signal
-    return ""
+    return extract_taskboard_signal_impl(text, hooks=session_runtime_hooks())
 
 
 def taskboard_light_research_brief_lines(*, continuous_mode: bool) -> list[str]:
@@ -5064,49 +4919,15 @@ def compact_binding_execution_sections(spec: dict[str, Any], *, allow_no_further
 
 
 def extract_text_from_message_content(content: Any) -> str:
-    if not isinstance(content, list):
-        return ""
-    fragments: list[str] = []
-    for item in content:
-        if not isinstance(item, dict):
-            continue
-        item_type = str(item.get("type", "")).strip()
-        if item_type not in {"output_text", "input_text"}:
-            continue
-        text = str(item.get("text", "")).strip()
-        if text:
-            fragments.append(text)
-    return "\n".join(fragments).strip()
+    return extract_text_from_message_content_impl(content)
 
 
 def extract_last_assistant_message_from_rollout(path: Path, *, min_entry_ts: float = 0.0) -> str:
-    try:
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except Exception:
-        return ""
-    last_message = ""
-    for raw_line in lines:
-        if not raw_line.strip():
-            continue
-        try:
-            entry = json.loads(raw_line)
-        except Exception:
-            continue
-        if str(entry.get("type", "")) != "response_item":
-            continue
-        if min_entry_ts > 0:
-            entry_ts = parse_timestamp_to_unix(entry.get("timestamp"))
-            if entry_ts is None or entry_ts + ROLLOUT_FALLBACK_ENTRY_GRACE_SECONDS < min_entry_ts:
-                continue
-        message = entry.get("payload", {})
-        if not isinstance(message, dict):
-            continue
-        if str(message.get("type", "")) != "message" or str(message.get("role", "")) != "assistant":
-            continue
-        content_text = extract_text_from_message_content(message.get("content", []))
-        if content_text:
-            last_message = content_text
-    return last_message.strip()
+    return extract_last_assistant_message_from_rollout_impl(
+        path,
+        min_entry_ts=min_entry_ts,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def latest_local_assistant_message_for_session(
@@ -5116,23 +4937,13 @@ def latest_local_assistant_message_for_session(
     min_mtime: float = 0.0,
     min_entry_ts: float | None = None,
 ) -> str:
-    if not session_id:
-        return ""
-    if min_entry_ts is None:
-        min_entry_ts = min_mtime
-    candidates: list[tuple[float, Path]] = []
-    for path in rollout_candidates_for_session(config, session_id):
-        try:
-            candidates.append((float(path.stat().st_mtime), path))
-        except FileNotFoundError:
-            continue
-    for mtime, path in sorted(candidates, key=lambda item: (item[0], str(item[1])), reverse=True):
-        if min_mtime > 0 and mtime + ROLLOUT_FALLBACK_MTIME_GRACE_SECONDS < min_mtime:
-            continue
-        message = extract_last_assistant_message_from_rollout(path, min_entry_ts=min_entry_ts)
-        if message:
-            return message
-    return ""
+    return latest_local_assistant_message_for_session_impl(
+        config,
+        session_id,
+        min_mtime=min_mtime,
+        min_entry_ts=min_entry_ts,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def allow_local_rollout_fallback(
@@ -5141,148 +4952,64 @@ def allow_local_rollout_fallback(
     mode: str,
     session_id: str,
 ) -> bool:
-    if mode != "resume":
-        return True
-    thread = find_thread_info(config, session_id) or {}
-    source = str(thread.get("source", "")).strip().lower()
-    if source == "vscode":
-        return False
-    return True
+    return allow_local_rollout_fallback_impl(
+        config,
+        mode=mode,
+        session_id=session_id,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def is_rate_limit_retry_error(*texts: str) -> bool:
-    combined = "\n".join(texts).lower()
-    return all(pattern in combined for pattern in RATE_LIMIT_PATTERNS)
+    return is_rate_limit_retry_error_impl(*texts, hooks=session_runtime_hooks())
 
 
 def is_session_busy_error(*texts: str) -> bool:
-    combined = "\n".join(texts).lower()
-    if any(pattern in combined for pattern in SESSION_BUSY_PATTERNS):
-        return True
-    return "busy" in combined and any(token in combined for token in ("session", "thread", "conversation", "request", "response", "run"))
+    return is_session_busy_error_impl(*texts, hooks=session_runtime_hooks())
 
 
 def platform_error_spec_for_kind(kind: str) -> dict[str, Any]:
-    normalized_kind = str(kind or "").strip()
-    if not normalized_kind:
-        return {}
-    if normalized_kind == "rate_limited":
-        return {
-            "kind": "rate_limited",
-            "retryable": True,
-            "needs_human_attention": False,
-            "summary": "上游平台触发了 429 / retry limit，taskboard 将延迟重试。",
-            "matched_pattern": "429 too many requests",
-        }
-    for signature in PLATFORM_ERROR_SIGNATURES:
-        if str(signature.get("kind", "")).strip() == normalized_kind:
-            return {
-                "kind": normalized_kind,
-                "retryable": bool(signature.get("retryable", False)),
-                "needs_human_attention": not bool(signature.get("retryable", False)),
-                "summary": str(signature.get("summary", "")).strip(),
-                "matched_pattern": "",
-            }
-    return {}
+    return platform_error_spec_for_kind_impl(kind, hooks=session_runtime_hooks())
 
 
 def classify_platform_error(*texts: str) -> dict[str, Any]:
-    combined = "\n".join(str(text or "") for text in texts if str(text or "").strip())
-    lowered = combined.lower()
-    if not lowered:
-        return {
-            "kind": "",
-            "retryable": False,
-            "needs_human_attention": False,
-            "summary": "",
-            "matched_pattern": "",
-        }
-    if is_rate_limit_retry_error(combined):
-        return platform_error_spec_for_kind("rate_limited")
-    for signature in PLATFORM_ERROR_SIGNATURES:
-        for pattern in signature.get("patterns", ()):
-            if str(pattern).lower() in lowered:
-                details = platform_error_spec_for_kind(str(signature.get("kind", "")).strip())
-                details["matched_pattern"] = str(pattern)
-                return details
-    return {
-        "kind": "",
-        "retryable": False,
-        "needs_human_attention": False,
-        "summary": "",
-        "matched_pattern": "",
-    }
+    return classify_platform_error_impl(*texts, hooks=session_runtime_hooks())
 
 
 def continue_retry_error_kind(*texts: str) -> str:
-    if is_rate_limit_retry_error(*texts):
-        return "rate_limited"
-    details = classify_platform_error(*texts)
-    if bool(details.get("retryable", False)):
-        return str(details.get("kind", "")).strip() or "retryable_platform_error"
-    return ""
+    return continue_retry_error_kind_impl(*texts, hooks=session_runtime_hooks())
 
 
 def platform_error_from_reason(reason: str) -> dict[str, Any]:
-    normalized_reason = str(reason or "").strip().lower()
-    if not normalized_reason:
-        return {
-            "kind": "",
-            "retryable": False,
-            "needs_human_attention": False,
-            "summary": "",
-            "matched_pattern": "",
-        }
-    if normalized_reason == "rate_limited":
-        return platform_error_spec_for_kind("rate_limited")
-    if normalized_reason.startswith("platform_error:"):
-        return platform_error_spec_for_kind(normalized_reason.split(":", 1)[1])
-    return {
-        "kind": "",
-        "retryable": False,
-        "needs_human_attention": False,
-        "summary": "",
-        "matched_pattern": "",
-    }
+    return platform_error_from_reason_impl(reason, hooks=session_runtime_hooks())
 
 
 def platform_error_deferred_reason(kind: str) -> str:
-    normalized_kind = str(kind or "").strip()
-    if normalized_kind == "rate_limited":
-        return "rate_limited"
-    return f"platform_error:{normalized_kind}" if normalized_kind else ""
+    return platform_error_deferred_reason_impl(kind)
 
 
 def platform_error_retry_after_seconds(*, retryable: bool, min_idle_seconds: int) -> int:
-    base_delay = DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS
-    if retryable:
-        return base_delay
-    return max(base_delay, DEFAULT_PLATFORM_ERROR_HUMAN_RETRY_SECONDS)
+    return platform_error_retry_after_seconds_impl(
+        retryable=retryable,
+        min_idle_seconds=min_idle_seconds,
+        hooks=session_runtime_hooks(),
+    )
 
 
 def session_busy_retry_after_seconds() -> int:
-    return DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS
+    return session_busy_retry_after_seconds_impl(hooks=session_runtime_hooks())
 
 
 def platform_error_result_fields(details: dict[str, Any], *, source: str) -> dict[str, Any]:
-    kind = str(details.get("kind", "")).strip()
-    if not kind:
-        return {}
-    return {
-        "platform_error_kind": kind,
-        "platform_error_summary": str(details.get("summary", "")).strip(),
-        "platform_error_retryable": bool(details.get("retryable", False)),
-        "platform_error_needs_human_attention": bool(details.get("needs_human_attention", False)),
-        "platform_error_source": str(source or "").strip(),
-    }
+    return platform_error_result_fields_impl(details, source=source)
 
 
 def retry_after_seconds_from_target(target_ts: float) -> int:
-    return max(1, int(math.ceil(max(0.0, float(target_ts) - time.time()))))
+    return retry_after_seconds_from_target_impl(target_ts, hooks=session_runtime_hooks())
 
 
 def default_retry_delay_seconds(min_idle_seconds: int = 0) -> int:
-    return max(DEFAULT_RESUME_RETRY_SECONDS, int(min_idle_seconds or 0), 1)
+    return default_retry_delay_seconds_impl(min_idle_seconds, hooks=session_runtime_hooks())
 
 
 def build_deferred_resume_result(
@@ -5297,25 +5024,17 @@ def build_deferred_resume_result(
     started_at: str,
     finished_at: str,
 ) -> dict[str, Any]:
-    return {
-        "attempted": attempted,
-        "ok": False,
-        "deferred": True,
-        "deferred_reason": deferred_reason,
-        "retry_after_seconds": max(1, int(retry_after_seconds or 1)),
-        "original_session_id": original_session_id,
-        "resumed_session_id": resumed_session_id,
-        "used_fallback_clone": False,
-        "codex_exec_mode": codex_exec_mode,
-        "prompt_chars": prompt_chars,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "message_written": False,
-        "last_message_text": "",
-        "continue_attempts": 0,
-        "recovered_with_continue": False,
-        "taskboard_signal": "",
-    }
+    return build_deferred_resume_result_impl(
+        original_session_id=original_session_id,
+        resumed_session_id=resumed_session_id,
+        codex_exec_mode=codex_exec_mode,
+        prompt_chars=prompt_chars,
+        deferred_reason=deferred_reason,
+        retry_after_seconds=retry_after_seconds,
+        attempted=attempted,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
 
 
 def process_runtime_hooks() -> ProcessRuntimeHooks:
@@ -9974,23 +9693,19 @@ def resume_codex_session_with_prompt(
             track_resume_feedback=True,
         )
         completed = exec_result["completed"]
+        message_written = bool(exec_result["message_written"])
+        last_message_text = str(exec_result.get("last_message_text", "") or "")
         result.update(
             {
                 "completed": completed,
-                "first_returncode": completed.returncode,
-                "stdout_tail": completed.stdout[-4000:],
-                "stderr_tail": completed.stderr[-4000:],
+                **command_runtime_result_fields_impl(
+                    completed,
+                    exec_result,
+                    last_message_text=last_message_text,
+                    hooks=session_runtime_hooks(),
+                ),
             }
         )
-        message_written = bool(exec_result["message_written"])
-        last_message_text = str(exec_result.get("last_message_text", "") or "")
-        protocol_footer = extract_taskboard_protocol_footer(last_message_text or f"{completed.stdout}\n{completed.stderr}")
-        result["message_written"] = message_written
-        result["last_message_text"] = last_message_text
-        result["taskboard_signal"] = extract_taskboard_signal(last_message_text or f"{completed.stdout}\n{completed.stderr}")
-        result["taskboard_protocol"] = protocol_footer
-        result["continue_attempts"] = int(exec_result["continue_attempts"])
-        result["recovered_with_continue"] = bool(exec_result["recovered_with_continue"])
         append_log(
             log_path,
             f"resume_primary returncode={completed.returncode} stdout_tail={completed.stdout[-1000:]} stderr_tail={completed.stderr[-1000:]}",
@@ -9998,6 +9713,35 @@ def resume_codex_session_with_prompt(
         primary_platform_error = classify_platform_error(completed.stdout, completed.stderr)
         if primary_platform_error.get("kind"):
             result.update(platform_error_result_fields(primary_platform_error, source="primary"))
+
+        def defer_after_attempt(
+            *,
+            deferred_reason: str,
+            retry_after: int,
+            target_session_id: str,
+            log_message: str,
+            platform_error: dict[str, Any] | None = None,
+            platform_error_source: str = "primary",
+        ) -> dict[str, Any]:
+            append_log(log_path, log_message)
+            result.update(
+                build_deferred_resume_result(
+                    original_session_id=original_session_id,
+                    resumed_session_id=target_session_id,
+                    codex_exec_mode=spec["codex_exec_mode"],
+                    prompt_chars=len(prompt),
+                    deferred_reason=deferred_reason,
+                    retry_after_seconds=retry_after,
+                    attempted=True,
+                    started_at=started_at,
+                    finished_at=utc_now(),
+                )
+            )
+            if platform_error and platform_error.get("kind"):
+                result.update(platform_error_result_fields(platform_error, source=platform_error_source))
+                result["needs_human_attention"] = bool(platform_error.get("needs_human_attention", False))
+            return result
+
         if completed.returncode == 0 or message_written:
             result["ok"] = True
             result["finished_at"] = utc_now()
@@ -10020,95 +9764,44 @@ def resume_codex_session_with_prompt(
             retry_after = DEFAULT_SESSION_MIGRATION_INTERRUPT_GRACE_SECONDS
             if redirect_state_after_attempt == "migrating":
                 deferred_reason = "session_migration_in_progress"
-            append_log(
-                log_path,
-                f"resume_deferred reason={deferred_reason} session_id={original_session_id} redirected_session_id={redirect_target_after_attempt} retry_after_seconds={retry_after}",
-            )
             result.update(
-                build_deferred_resume_result(
-                    original_session_id=original_session_id,
-                    resumed_session_id=redirect_target_after_attempt,
-                    codex_exec_mode=spec["codex_exec_mode"],
-                    prompt_chars=len(prompt),
+                defer_after_attempt(
                     deferred_reason=deferred_reason,
-                    retry_after_seconds=retry_after,
-                    attempted=True,
-                    started_at=started_at,
-                    finished_at=utc_now(),
+                    retry_after=retry_after,
+                    target_session_id=redirect_target_after_attempt,
+                    log_message=(
+                        f"resume_deferred reason={deferred_reason} session_id={original_session_id} "
+                        f"redirected_session_id={redirect_target_after_attempt} retry_after_seconds={retry_after}"
+                    ),
                 )
-            )
-            result.update(
-                {
-                    "first_returncode": completed.returncode,
-                    "stdout_tail": completed.stdout[-4000:],
-                    "stderr_tail": completed.stderr[-4000:],
-                    "message_written": message_written,
-                    "last_message_text": last_message_text,
-                    "taskboard_signal": extract_taskboard_signal(last_message_text or f"{completed.stdout}\n{completed.stderr}"),
-                    "taskboard_protocol": protocol_footer,
-                    "continue_attempts": int(exec_result["continue_attempts"]),
-                    "recovered_with_continue": bool(exec_result["recovered_with_continue"]),
-                }
             )
             return result
         if is_rate_limit_retry_error(completed.stdout, completed.stderr):
             retry_after = DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS
-            append_log(log_path, f"resume_deferred reason=rate_limited session_id={resumed_session_id} retry_after_seconds={retry_after}")
             result.update(
-                build_deferred_resume_result(
-                    original_session_id=original_session_id,
-                    resumed_session_id=resumed_session_id,
-                    codex_exec_mode=spec["codex_exec_mode"],
-                    prompt_chars=len(prompt),
+                defer_after_attempt(
                     deferred_reason="rate_limited",
-                    retry_after_seconds=retry_after,
-                    attempted=True,
-                    started_at=started_at,
-                    finished_at=utc_now(),
+                    retry_after=retry_after,
+                    target_session_id=resumed_session_id,
+                    log_message=(
+                        f"resume_deferred reason=rate_limited session_id={resumed_session_id} "
+                        f"retry_after_seconds={retry_after}"
+                    ),
                 )
-            )
-            result.update(
-                {
-                    "first_returncode": completed.returncode,
-                    "stdout_tail": completed.stdout[-4000:],
-                    "stderr_tail": completed.stderr[-4000:],
-                    "message_written": message_written,
-                    "last_message_text": last_message_text,
-                    "taskboard_signal": extract_taskboard_signal(last_message_text or f"{completed.stdout}\n{completed.stderr}"),
-                    "taskboard_protocol": protocol_footer,
-                    "continue_attempts": int(exec_result["continue_attempts"]),
-                    "recovered_with_continue": bool(exec_result["recovered_with_continue"]),
-                }
             )
             return result
         if is_session_busy_error(completed.stdout, completed.stderr):
             retry_after = session_busy_retry_after_seconds()
-            append_log(log_path, f"resume_deferred reason=session_busy session_id={resumed_session_id} retry_after_seconds={retry_after}")
             result.update(
-                build_deferred_resume_result(
-                    original_session_id=original_session_id,
-                    resumed_session_id=resumed_session_id,
-                    codex_exec_mode=spec["codex_exec_mode"],
-                    prompt_chars=len(prompt),
+                defer_after_attempt(
                     deferred_reason="session_busy",
-                    retry_after_seconds=retry_after,
-                    attempted=True,
-                    started_at=started_at,
-                    finished_at=utc_now(),
+                    retry_after=retry_after,
+                    target_session_id=resumed_session_id,
+                    log_message=(
+                        f"resume_deferred reason=session_busy session_id={resumed_session_id} "
+                        f"retry_after_seconds={retry_after}"
+                    ),
                 )
-            )
-            result.update(
-                {
-                    "first_returncode": completed.returncode,
-                    "stdout_tail": completed.stdout[-4000:],
-                    "stderr_tail": completed.stderr[-4000:],
-                    "message_written": message_written,
-                    "last_message_text": last_message_text,
-                    "taskboard_signal": extract_taskboard_signal(last_message_text or f"{completed.stdout}\n{completed.stderr}"),
-                    "taskboard_protocol": protocol_footer,
-                    "continue_attempts": int(exec_result["continue_attempts"]),
-                    "recovered_with_continue": bool(exec_result["recovered_with_continue"]),
-                }
             )
             return result
         fallback_provider = (spec.get("fallback_provider") or "").strip()
@@ -10118,25 +9811,18 @@ def resume_codex_session_with_prompt(
                 min_idle_seconds=min_idle_seconds,
             )
             deferred_reason = platform_error_deferred_reason(str(primary_platform_error.get("kind", "")).strip())
-            append_log(
-                log_path,
-                f"resume_deferred reason={deferred_reason} session_id={resumed_session_id} retry_after_seconds={retry_after}",
-            )
             result.update(
-                build_deferred_resume_result(
-                    original_session_id=original_session_id,
-                    resumed_session_id=resumed_session_id,
-                    codex_exec_mode=spec["codex_exec_mode"],
-                    prompt_chars=len(prompt),
+                defer_after_attempt(
                     deferred_reason=deferred_reason,
-                    retry_after_seconds=retry_after,
-                    attempted=True,
-                    started_at=started_at,
-                    finished_at=utc_now(),
+                    retry_after=retry_after,
+                    target_session_id=resumed_session_id,
+                    log_message=(
+                        f"resume_deferred reason={deferred_reason} session_id={resumed_session_id} "
+                        f"retry_after_seconds={retry_after}"
+                    ),
+                    platform_error=primary_platform_error,
                 )
             )
-            result.update(platform_error_result_fields(primary_platform_error, source="primary"))
-            result["needs_human_attention"] = bool(primary_platform_error.get("needs_human_attention", False))
             return result
         if not fallback_provider:
             result["finished_at"] = utc_now()
@@ -10194,27 +9880,21 @@ def resume_codex_session_with_prompt(
                 min_idle_seconds=min_idle_seconds,
             )
             deferred_reason = platform_error_deferred_reason(str(fallback_platform_error.get("kind", "")).strip())
-            append_log(
-                log_path,
-                f"resume_deferred reason={deferred_reason} session_id={cloned_session_id} retry_after_seconds={retry_after}",
-            )
             result.update(
-                build_deferred_resume_result(
-                    original_session_id=original_session_id,
-                    resumed_session_id=cloned_session_id,
-                    codex_exec_mode=spec["codex_exec_mode"],
-                    prompt_chars=len(prompt),
+                defer_after_attempt(
                     deferred_reason=deferred_reason,
-                    retry_after_seconds=retry_after,
-                    attempted=True,
-                    started_at=started_at,
-                    finished_at=utc_now(),
+                    retry_after=retry_after,
+                    target_session_id=cloned_session_id,
+                    log_message=(
+                        f"resume_deferred reason={deferred_reason} session_id={cloned_session_id} "
+                        f"retry_after_seconds={retry_after}"
+                    ),
+                    platform_error=fallback_platform_error,
+                    platform_error_source="fallback",
                 )
             )
-            result.update(platform_error_result_fields(fallback_platform_error, source="fallback"))
             result["used_fallback_clone"] = True
             result["fallback_provider"] = fallback_provider
-            result["needs_human_attention"] = bool(fallback_platform_error.get("needs_human_attention", False))
             return result
         result["finished_at"] = utc_now()
         return result

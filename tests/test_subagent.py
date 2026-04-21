@@ -268,6 +268,63 @@ class SubagentTests(unittest.TestCase):
             self.assertIn("NO_FURTHER_TASKS", result["last_message_text"])
             self.assertTrue(output_path.exists())
 
+    def test_run_codex_prompt_rollout_fallback_ignores_invalid_json_noise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            session_id = "019followup-session-invalid-json"
+            output_path = config.app_home / "followup-last-message.txt"
+
+            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+                rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
+                rollout_dir.mkdir(parents=True, exist_ok=True)
+                rollout_path = rollout_dir / f"rollout-2026-03-19T00-00-00-{session_id}.jsonl"
+                rollout_path.write_text(
+                    "\n".join(
+                        [
+                            "this is not valid json",
+                            json.dumps(
+                                {
+                                    "timestamp": "1970-01-01T00:01:41Z",
+                                    "type": "response_item",
+                                    "payload": {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [
+                                            {
+                                                "type": "output_text",
+                                                "text": "stable\nTASKBOARD_SIGNAL=WAITING_ON_ASYNC\n",
+                                            }
+                                        ],
+                                    },
+                                }
+                            ),
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+                "codex_taskboard.cli.time.time",
+                return_value=100.0,
+            ):
+                result = run_codex_prompt_with_continue_recovery(
+                    config,
+                    mode="resume",
+                    prompt="continue",
+                    output_last_message_path=str(output_path),
+                    codex_exec_mode="dangerous",
+                    workdir="/home/Awei",
+                    timeout_seconds=60,
+                    log_path=config.app_home / "followup.log",
+                    session_id=session_id,
+                )
+
+            self.assertTrue(result["message_written"])
+            self.assertIn("WAITING_ON_ASYNC", result["last_message_text"])
+            self.assertTrue(output_path.exists())
+
     def test_run_codex_prompt_ignores_stale_rollout_message_when_only_non_assistant_events_are_new(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = build_config(Path(tmpdir))
