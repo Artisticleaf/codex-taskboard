@@ -6,13 +6,13 @@
 
 如果你只关心“怎么让 agent 稳定自动推进科研”，先看这一段就够了：
 
-- 当前 runtime 对 agent 的后台唤起，默认只保留一个最小合同：异常 canonical head 提示、单次出现的绑定路径、单次出现的写回要求、单次出现的 `Taskboard 操作方法`、固定“轻度科研约定”、continuous 收口补充句、固定协议尾注。
-- fixed “轻度科研约定” 的核心内容就是：先吸收本轮回流；默认在当前长上下文完成本地读取、数据处理、可靠性审计、proposal/history 写回与必要文献对照；结果可疑就先回查代码逻辑、数据契约、数据泄漏、评测污染、split 错位、run 完整性。
-- 可靠结果先写 proposal，再决定是否升级进 history；写作要求保持正式科研语体，并把内部缩写、实验代号、结果和结论讲人话。
-- 一旦形成可执行实验包，就先完成严格代码审计与 smoke test；GPU 实验默认按 4 卡高吞吐规划，并尽量把 GPU 利用率优化到较高水平后再正式发车。
+- 当前 runtime 的自动唤起 prompt 现在按“短而精准”的最小合同组织：固定“轻度科研约定”、单次出现的绑定路径、当前回流/任务摘要、单次出现的 `Taskboard 操作简介`、固定协议尾注；不再把冗长的写回/转场说明重复塞进每个 scene。
+- “轻度科研约定”的默认文案已经独立到 `prompts/taskboard_runtime_prompt_zh.toml`；你也可以用 `CODEX_TASKBOARD_PROMPT_FILE` 或 `~/.config/codex-taskboard/taskboard_runtime_prompt_zh.toml` 做本机覆盖，而不必改 runtime 代码。
+- 新版“轻度科研约定”的重点是：先读 proposal/history 与回流；本地 CPU-only 短工作在当前上下文一次做完；结果异常先怀疑实现并做诊断；smoke/bug/OOM 在当前回合解决；GPU 实验先优化程序效率与利用率；proposal/history 写回必须说人话；当前 proposal 收口后不能卡在完成态。
 - CPU-only 数据处理/审计/小修复默认留在当前对话；正式 GPU/remote/async 任务交给 taskboard。`submit` / `bind-before-launch` 默认配合 tmux 托管，已在 tmux 中启动的进程可用 `attach-pid` 接管；所有正式实验建议优先使用 tmux。
 - 若同一 `codex_session_id + proposal_path + command` 已有 `queued/submitted/running/watching` 任务，taskboard 默认阻止重复提交；只有在你确认 authoritative 任务状态之后，才应显式加 `--allow-duplicate-submit`（API 为 `allow_duplicate_submit=true`）。
 - continuous 模式下，当前方向收口或无信息增益时，不是停机，而是先把分析和收口理由写进 history，再拟定新 proposal，并在提交下一阶段受托管实验后用 `NEW_TASKS_STARTED` 完成转场。
+- 手动检查当前生效 prompt 时，可以直接运行 `codex-taskboard prompt-preview --scene resume` 或其他 scene，再按需编辑上面的 TOML 文件。
 
 当前版本的“防呆”主要靠下面几层：
 
