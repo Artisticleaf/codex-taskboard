@@ -292,6 +292,50 @@ class ResumeTests(unittest.TestCase):
             self.assertEqual(result["deferred_reason"], "rate_limited")
             self.assertGreaterEqual(result["retry_after_seconds"], 1)
 
+    def test_resume_defers_after_attempt_without_losing_continue_recovery_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            spec = {
+                "task_id": "fill-rate-limit-preserve",
+                "codex_session_id": "session-continue-123",
+                "workdir": "/home/Awei",
+                "command": "sleep 10",
+                "codex_exec_mode": "dangerous",
+                "resume_timeout_seconds": 30,
+                "fallback_provider": "",
+            }
+            completed = subprocess.CompletedProcess(
+                args=["codex", "exec", "resume"],
+                returncode=1,
+                stdout="session id: session-continue-123\n",
+                stderr="exceeded retry limit, last status: 429 Too Many Requests",
+            )
+
+            with patch(
+                "codex_taskboard.cli.run_codex_prompt_with_continue_recovery",
+                return_value={
+                    "completed": completed,
+                    "session_id": "session-continue-123",
+                    "message_written": False,
+                    "last_message_text": "",
+                    "continue_attempts": 2,
+                    "recovered_with_continue": True,
+                },
+            ):
+                result = resume_codex_session_with_prompt(
+                    config,
+                    spec,
+                    "background batch",
+                    output_last_message_path=str(task_last_message_path(config, "fill-rate-limit-preserve")),
+                    log_path=config.app_home / "resume.log",
+                )
+
+            self.assertTrue(result["deferred"])
+            self.assertEqual(result["deferred_reason"], "rate_limited")
+            self.assertEqual(result["continue_attempts"], 2)
+            self.assertTrue(result["recovered_with_continue"])
+            self.assertEqual(result["first_returncode"], 1)
+
     def test_resume_defers_on_transient_platform_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = build_config(Path(tmpdir))
