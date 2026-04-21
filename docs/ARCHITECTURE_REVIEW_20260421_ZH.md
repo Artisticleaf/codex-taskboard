@@ -25,7 +25,9 @@
 |  - scheduler_resources.py: CPU/GPU placement and runtime shaping  |
 |  - automation_state.py: continuous/human-guidance state machine   |
 |  - task_storage.py: spec/state/event IO facade                    |
-|  - cli.py: dispatch core / launch / followup wiring / commands    |
+|  - cli.py: launch / followup wiring / commands / parser glue      |
+|  - scheduler.py: dispatch core + submit-time scheduling           |
+|  - scheduler_readiness.py: readiness + task-state enrichment      |
 |  - dispatcher_service.py: long-running dispatch loop shell        |
 +-------------------------------------------------------------------+
 |  Service Orchestration Layer                                      |
@@ -91,7 +93,8 @@
 
 ### P2 下一阶段建议
 
-- [ ] 继续抽离 dispatch / readiness 主循环到 `scheduler.py` / `scheduler_readiness.py`
+- [x] 继续抽离 dispatch / readiness 主循环到 `scheduler.py` / `scheduler_readiness.py`
+- [x] 把 submit 后的即时调度决策与 `enrich_task_state` read model 下沉到 scheduler 层
 - [ ] 把 followup queue/coalescing 继续从 `cli.py` 中拆成 `followup_runtime.py`
 - [ ] 把 `/status` / `/dashboard` 的剩余 read model 继续压出 `cli.py`
 - [ ] 逐步让 `cli.py` 只保留 parser + wiring + thin wrappers
@@ -100,6 +103,7 @@
 
 1. 新 repo 路径下可完整运行测试。
 2. 新 repo 路径下可通过真实 docker 用户完成 API smoke。
+   - 已新增 `extras/smoke/real_docker_api_smoke.py`，默认自动探测 rootless runtime / docker tenant，并验证“容器看不到 GPU、仍可通过 API 排队/提交/仅见本人完成任务”。
 3. 新 repo 路径下可完成一次真实 `codex exec` taskboard smoke。
 4. systemd 单元切换到 `/home/Awei/codex-taskboard/.venv/bin/codex-taskboard service run ...`。
 5. `codex-taskboard service doctor` 在切换后恢复为 healthy。

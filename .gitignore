@@ -1,7 +1,6 @@
-.venv/
-.venv_copied_backup/
+.venv*/
 .pytest_cache/
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *.egg-info/
 *.sqlite

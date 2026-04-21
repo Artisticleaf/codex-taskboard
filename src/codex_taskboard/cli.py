@@ -132,6 +132,27 @@ from codex_taskboard.scheduler_resources import (
     task_requested_cpu_workers as task_requested_cpu_workers_impl,
     task_requested_gpu_ids as task_requested_gpu_ids_impl,
 )
+from codex_taskboard.scheduler import (
+    SchedulerDispatchHooks,
+    SchedulerSubmitHooks,
+    dispatch_queued_tasks_unlocked as dispatch_queued_tasks_unlocked_impl,
+    finalize_submitted_task as finalize_submitted_task_impl,
+    reserve_cpu_threads_for_later_tasks as reserve_cpu_threads_for_later_tasks_impl,
+)
+from codex_taskboard.scheduler_readiness import (
+    SchedulerEnrichmentHooks,
+    SchedulerReadinessHooks,
+    artifact_resolution as artifact_resolution_impl,
+    dependency_resolution as dependency_resolution_impl,
+    enrich_task_state as enrich_task_state_impl,
+    evaluate_task_readiness as evaluate_task_readiness_impl,
+    latest_task_state_for_key as latest_task_state_for_key_impl,
+    latest_task_states_by_key as latest_task_states_by_key_impl,
+    report_resolution as report_resolution_impl,
+    report_value_from_state as report_value_from_state_impl,
+    required_report_conditions as required_report_conditions_impl,
+    selected_gpu_snapshot as selected_gpu_snapshot_impl,
+)
 from codex_taskboard.api_views import (
     ApiViewHooks,
     build_task_list_payload_for_api as build_task_list_payload_for_api_impl,
@@ -8260,6 +8281,38 @@ def scheduler_resource_hooks() -> SchedulerResourceHooks:
     )
 
 
+def scheduler_readiness_hooks() -> SchedulerReadinessHooks:
+    return SchedulerReadinessHooks(
+        is_hidden_status=is_hidden_status,
+        task_state_recency_key=task_state_recency_key,
+        iter_all_task_states=iter_all_task_states,
+        newest_matches=newest_matches,
+        success_taskboard_signals=SUCCESS_TASKBOARD_SIGNALS,
+        resolved_cpu_profile=resolved_cpu_profile,
+        declared_cpu_profile=declared_cpu_profile,
+        resolve_cpu_thread_policy=resolve_cpu_thread_policy,
+        resolve_cpu_worker_policy=resolve_cpu_worker_policy,
+        coerce_non_negative_int=coerce_non_negative_int,
+        select_gpu_ids_for_task=select_gpu_ids_for_task,
+        gpu_row_free_mb=gpu_row_free_mb,
+    )
+
+
+def scheduler_enrichment_hooks() -> SchedulerEnrichmentHooks:
+    return SchedulerEnrichmentHooks(
+        load_task_spec=load_task_spec,
+        normalize_task_spec_payload=normalize_task_spec_payload,
+        parse_gpu_id_list=parse_gpu_id_list,
+        evaluate_task_readiness=evaluate_task_readiness,
+        task_lifecycle_state=task_lifecycle_state,
+        task_runtime_state=task_runtime_state,
+        task_has_launch_metadata=task_has_launch_metadata,
+        task_platform_recovery_state=task_platform_recovery_state,
+        task_automation_recommendation=task_automation_recommendation,
+        followup_entity_info=followup_entity_info,
+    )
+
+
 def detect_default_cpu_thread_limit() -> int:
     return detect_default_cpu_thread_limit_impl(hooks=scheduler_resource_hooks())
 
@@ -11103,22 +11156,11 @@ def task_state_recency_key(state: dict[str, Any]) -> tuple[float, float, str]:
 
 
 def latest_task_states_by_key(states: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    latest: dict[str, dict[str, Any]] = {}
-    for state in states:
-        status = str(state.get("status", ""))
-        if is_hidden_status(status):
-            continue
-        task_key = str(state.get("task_key", state.get("task_id", ""))).strip()
-        if not task_key:
-            continue
-        previous = latest.get(task_key)
-        if previous is None or task_state_recency_key(state) > task_state_recency_key(previous):
-            latest[task_key] = state
-    return latest
+    return latest_task_states_by_key_impl(states, hooks=scheduler_readiness_hooks())
 
 
 def latest_task_state_for_key(config: AppConfig, task_key: str) -> dict[str, Any] | None:
-    return latest_task_states_by_key(iter_all_task_states(config)).get(task_key)
+    return latest_task_state_for_key_impl(config, task_key, hooks=scheduler_readiness_hooks())
 
 
 def stringify_report_value(value: Any) -> str:
@@ -11137,32 +11179,11 @@ def stringify_report_value(value: Any) -> str:
 
 
 def required_report_conditions(spec: dict[str, Any]) -> list[dict[str, str]]:
-    conditions = spec.get("required_report_conditions", []) or []
-    parsed: list[dict[str, str]] = []
-    for item in conditions:
-        if isinstance(item, dict):
-            key = str(item.get("key", "")).strip()
-            expected = str(item.get("expected", "")).strip()
-        else:
-            raw = str(item).strip()
-            if "=" not in raw:
-                continue
-            key, expected = raw.split("=", 1)
-            key = key.strip()
-            expected = expected.strip()
-        if not key:
-            continue
-        parsed.append({"key": key, "expected": expected})
-    return parsed
+    return required_report_conditions_impl(spec)
 
 
 def report_value_from_state(state: dict[str, Any], key: str) -> str:
-    if key in state:
-        return stringify_report_value(state.get(key))
-    structured_report = state.get("structured_report", {})
-    if isinstance(structured_report, dict) and key in structured_report:
-        return stringify_report_value(structured_report.get(key))
-    return ""
+    return report_value_from_state_impl(state, key)
 
 
 def dependency_resolution(
@@ -11171,127 +11192,24 @@ def dependency_resolution(
     *,
     latest_states_by_key: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    dependencies = spec.get("depends_on", [])
-    if not isinstance(dependencies, list):
-        return [], {}
-    resolution: list[dict[str, Any]] = []
-    latest_states: dict[str, dict[str, Any]] = {}
-    for dep in dependencies:
-        dep_key = str(dep).strip()
-        if not dep_key:
-            continue
-        state = latest_states_by_key.get(dep_key) if latest_states_by_key is not None else latest_task_state_for_key(config, dep_key)
-        latest_states[dep_key] = state or {}
-        if state is None:
-            resolution.append(
-                {
-                    "task_key": dep_key,
-                    "resolved_task_id": "",
-                    "resolved_status": "missing",
-                    "satisfied": False,
-                    "reason": "missing_dependency",
-                }
-            )
-            continue
-        status = str(state.get("status", ""))
-        signal_required = bool(state.get("require_signal_to_unblock", False))
-        signal_value = str(state.get("taskboard_signal", "")).strip()
-        satisfied = status in {"completed", "observed_exit"} and (not signal_required or signal_value in SUCCESS_TASKBOARD_SIGNALS)
-        reason = "ready"
-        if status not in {"completed", "observed_exit"}:
-            reason = f"upstream_status:{status or 'unknown'}"
-        elif signal_required and signal_value not in SUCCESS_TASKBOARD_SIGNALS:
-            reason = f"waiting_signal:{signal_value or 'missing'}"
-        resolution.append(
-            {
-                "task_key": dep_key,
-                "resolved_task_id": str(state.get("task_id", "")),
-                "resolved_status": status,
-                "resolved_signal": signal_value,
-                "require_signal_to_unblock": signal_required,
-                "satisfied": satisfied,
-                "reason": reason,
-            }
-        )
-    return resolution, latest_states
+    return dependency_resolution_impl(
+        config,
+        spec,
+        hooks=scheduler_readiness_hooks(),
+        latest_states_by_key=latest_states_by_key,
+    )
 
 
 def artifact_resolution(spec: dict[str, Any]) -> list[dict[str, Any]]:
-    patterns = spec.get("required_artifact_globs", []) or []
-    if not isinstance(patterns, list):
-        return []
-    resolution: list[dict[str, Any]] = []
-    workdir = str(spec.get("workdir", ""))
-    for pattern in patterns:
-        raw_pattern = str(pattern).strip()
-        if not raw_pattern:
-            continue
-        matches = newest_matches(raw_pattern, workdir)
-        newest = matches[-1] if matches else None
-        resolution.append(
-            {
-                "pattern": raw_pattern,
-                "matched": bool(newest),
-                "newest_path": str(newest) if newest else "",
-            }
-        )
-    return resolution
+    return artifact_resolution_impl(spec, hooks=scheduler_readiness_hooks())
 
 
 def report_resolution(spec: dict[str, Any], latest_dependency_states: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    conditions = required_report_conditions(spec)
-    if not conditions:
-        return []
-    resolution: list[dict[str, Any]] = []
-    dependency_items = [(task_key, state) for task_key, state in latest_dependency_states.items() if state]
-    for condition in conditions:
-        key = condition["key"]
-        expected = condition["expected"]
-        matched_task_id = ""
-        actual_values: list[str] = []
-        satisfied = False
-        for _dep_key, state in dependency_items:
-            actual = report_value_from_state(state, key)
-            if actual:
-                actual_values.append(actual)
-            if actual == expected:
-                matched_task_id = str(state.get("task_id", ""))
-                satisfied = True
-                break
-        deduped_actual_values = sorted(set(actual_values))
-        reason = "ready" if satisfied else ("missing_report_value" if not deduped_actual_values else "report_value_mismatch")
-        resolution.append(
-            {
-                "key": key,
-                "expected": expected,
-                "actual_values": deduped_actual_values,
-                "resolved_task_id": matched_task_id,
-                "satisfied": satisfied,
-                "reason": reason,
-            }
-        )
-    return resolution
+    return report_resolution_impl(spec, latest_dependency_states)
 
 
 def selected_gpu_snapshot(gpu_rows: list[dict[str, Any]], gpu_ids: list[int]) -> list[dict[str, Any]]:
-    row_by_index = {int(row.get("index", -1)): row for row in gpu_rows}
-    snapshot: list[dict[str, Any]] = []
-    for gpu_id in gpu_ids:
-        row = row_by_index.get(int(gpu_id))
-        if row is None:
-            snapshot.append({"index": int(gpu_id), "missing": True})
-            continue
-        snapshot.append(
-            {
-                "index": int(row.get("index", gpu_id)),
-                "name": str(row.get("name", "")),
-                "memory_total_mb": int(row.get("memory_total_mb", 0) or 0),
-                "memory_used_mb": int(row.get("memory_used_mb", 0) or 0),
-                "memory_free_mb": gpu_row_free_mb(row),
-                "gpu_util_percent": int(row.get("gpu_util_percent", 0) or 0),
-            }
-        )
-    return snapshot
+    return selected_gpu_snapshot_impl(gpu_rows, gpu_ids, hooks=scheduler_readiness_hooks())
 
 
 def evaluate_task_readiness(
@@ -11306,92 +11224,18 @@ def evaluate_task_readiness(
     cpu_thread_limit: int = 0,
     latest_states_by_key: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    dep_resolution, latest_dependency_states = dependency_resolution(config, spec, latest_states_by_key=latest_states_by_key)
-    artifact_req_resolution = artifact_resolution(spec)
-    report_req_resolution = report_resolution(spec, latest_dependency_states)
-    cpu_profile = resolved_cpu_profile(spec)
-    cpu_policy = resolve_cpu_thread_policy(spec, cpu_thread_limit=cpu_thread_limit)
-    cpu_worker_policy = resolve_cpu_worker_policy(spec, cpu_thread_limit=cpu_thread_limit)
-    cpu_threads = max(0, int(cpu_policy.get("reservation_threads", 0) or 0))
-    cpu_workers = max(0, int(cpu_worker_policy.get("reservation_workers", 0) or 0))
-    cpu_budget = cpu_threads + cpu_workers
-    cpu_thread_source = str(cpu_policy.get("source", "") or "default")
-    cpu_worker_source = str(cpu_worker_policy.get("source", "") or "default")
-
-    dependency_state = "none"
-    blocked_reason = ""
-    if dep_resolution:
-        dependency_state = "ready" if all(bool(item.get("satisfied", False)) for item in dep_resolution) else "waiting"
-        if dependency_state != "ready":
-            first = next((item for item in dep_resolution if not bool(item.get("satisfied", False))), dep_resolution[0])
-            blocked_reason = f"dependency:{first.get('task_key', '')}:{first.get('reason', 'waiting')}"
-
-    artifact_state = "none"
-    if artifact_req_resolution:
-        artifact_state = "ready" if all(bool(item.get("matched", False)) for item in artifact_req_resolution) else "waiting"
-        if not blocked_reason and artifact_state != "ready":
-            first = next((item for item in artifact_req_resolution if not bool(item.get("matched", False))), artifact_req_resolution[0])
-            blocked_reason = f"artifact:{first.get('pattern', '')}"
-
-    report_state = "none"
-    if report_req_resolution:
-        report_state = "ready" if all(bool(item.get("satisfied", False)) for item in report_req_resolution) else "waiting"
-        if not blocked_reason and report_state != "ready":
-            first = next((item for item in report_req_resolution if not bool(item.get("satisfied", False))), report_req_resolution[0])
-            blocked_reason = f"report:{first.get('key', '')}:{first.get('reason', 'waiting')}"
-
-    eligible_gpu_ids: list[int] = []
-    gpu_assignment_source = ""
-    gpu_block_reason = ""
-    available_cpu_threads = max(0, int(cpu_thread_limit) - int(active_cpu_threads) - int(reserved_cpu_threads)) if int(cpu_thread_limit) > 0 else 0
-    cpu_block_reason = ""
-    if not blocked_reason and int(cpu_thread_limit) > 0 and cpu_budget > 0 and cpu_budget > available_cpu_threads:
-        cpu_block_reason = f"need={cpu_budget}:available={available_cpu_threads}:limit={int(cpu_thread_limit)}"
-        blocked_reason = f"cpu_budget:{cpu_block_reason}"
-    if not blocked_reason and gpu_rows is not None and int(spec.get("gpu_slots", 0) or 0) > 0:
-        selected, selected_reason = select_gpu_ids_for_task(
-            spec,
-            total_gpu_slots=total_gpu_slots,
-            gpu_rows=gpu_rows,
-            reserved_gpu_ids=reserved_gpu_ids or set(),
-        )
-        if selected is None:
-            gpu_block_reason = selected_reason
-            blocked_reason = f"gpu_headroom:{selected_reason}"
-        else:
-            eligible_gpu_ids = selected
-            gpu_assignment_source = selected_reason
-
-    return {
-        "dependency_state": dependency_state,
-        "dependency_resolution": dep_resolution,
-        "artifact_state": artifact_state,
-        "artifact_resolution": artifact_req_resolution,
-        "report_state": report_state,
-        "report_resolution": report_req_resolution,
-        "blocked_reason": blocked_reason,
-        "cpu_profile": declared_cpu_profile(spec),
-        "cpu_profile_resolved": cpu_profile,
-        "cpu_threads": cpu_threads,
-        "cpu_threads_mode": str(cpu_policy.get("mode", "fixed")),
-        "cpu_threads_min": int(cpu_policy.get("min_threads", 0) or 0),
-        "cpu_threads_max": int(cpu_policy.get("max_threads", 0) or 0),
-        "assigned_cpu_threads": coerce_non_negative_int(spec.get("assigned_cpu_threads", 0)),
-        "cpu_thread_source": cpu_thread_source,
-        "cpu_workers": cpu_workers,
-        "cpu_workers_min": int(cpu_worker_policy.get("min_workers", 0) or 0),
-        "cpu_workers_max": int(cpu_worker_policy.get("max_workers", 0) or 0),
-        "assigned_cpu_workers": coerce_non_negative_int(spec.get("assigned_cpu_workers", 0)),
-        "cpu_worker_source": cpu_worker_source,
-        "cpu_budget": cpu_budget,
-        "available_cpu_threads": available_cpu_threads,
-        "cpu_block_reason": cpu_block_reason,
-        "cpu_policy": cpu_policy,
-        "cpu_worker_policy": cpu_worker_policy,
-        "eligible_gpu_ids": eligible_gpu_ids,
-        "gpu_assignment_source": gpu_assignment_source,
-        "gpu_block_reason": gpu_block_reason,
-    }
+    return evaluate_task_readiness_impl(
+        config,
+        spec,
+        hooks=scheduler_readiness_hooks(),
+        gpu_rows=gpu_rows,
+        total_gpu_slots=total_gpu_slots,
+        reserved_gpu_ids=reserved_gpu_ids,
+        active_cpu_threads=active_cpu_threads,
+        reserved_cpu_threads=reserved_cpu_threads,
+        cpu_thread_limit=cpu_thread_limit,
+        latest_states_by_key=latest_states_by_key,
+    )
 
 
 def enrich_task_state(
@@ -11406,39 +11250,10 @@ def enrich_task_state(
     cpu_thread_limit: int = 0,
     latest_states_by_key: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    enriched = dict(state)
-    task_id = str(state.get("task_id", "")).strip()
-    spec = load_task_spec(config, task_id) if task_id else normalize_task_spec_payload(state)
-    state_assigned_gpus = state.get("assigned_gpus", [])
-    state_allowed_gpus = state.get("allowed_gpus", [])
-    state_depends_on = state.get("depends_on", [])
-    merged_spec = dict(spec)
-    merged_spec.update(
-        {
-            "task_id": task_id or str(spec.get("task_id", "")),
-            "task_key": str(state.get("task_key", spec.get("task_key", ""))),
-            "workdir": str(state.get("workdir", spec.get("workdir", ""))),
-            "command": str(state.get("command", spec.get("command", ""))),
-            "gpu_slots": int(state.get("gpu_slots", spec.get("gpu_slots", 0)) or 0),
-            "cpu_profile": str(state.get("cpu_profile", spec.get("cpu_profile", "auto"))),
-            "cpu_threads": int(state.get("cpu_threads", spec.get("cpu_threads", 0)) or 0),
-            "cpu_threads_min": int(state.get("cpu_threads_min", spec.get("cpu_threads_min", 0)) or 0),
-            "cpu_threads_max": int(state.get("cpu_threads_max", spec.get("cpu_threads_max", 0)) or 0),
-            "cpu_threads_mode": str(state.get("cpu_threads_mode", spec.get("cpu_threads_mode", ""))),
-            "assigned_cpu_threads": int(state.get("assigned_cpu_threads", spec.get("assigned_cpu_threads", 0)) or 0),
-            "cpu_workers": int(state.get("cpu_workers", spec.get("cpu_workers", 0)) or 0),
-            "cpu_workers_min": int(state.get("cpu_workers_min", spec.get("cpu_workers_min", 0)) or 0),
-            "cpu_workers_max": int(state.get("cpu_workers_max", spec.get("cpu_workers_max", 0)) or 0),
-            "assigned_cpu_workers": int(state.get("assigned_cpu_workers", spec.get("assigned_cpu_workers", 0)) or 0),
-            "assigned_gpus": parse_gpu_id_list(state_assigned_gpus or spec.get("assigned_gpus", [])),
-            "allowed_gpus": parse_gpu_id_list(state_allowed_gpus or spec.get("allowed_gpus", [])),
-            "depends_on": state_depends_on or spec.get("depends_on", []),
-        }
-    )
-    recorded_gpu_assignment_source = str(state.get("gpu_assignment_source", spec.get("gpu_assignment_source", ""))).strip()
-    readiness = evaluate_task_readiness(
+    return enrich_task_state_impl(
         config,
-        merged_spec,
+        state,
+        hooks=scheduler_enrichment_hooks(),
         gpu_rows=gpu_rows,
         total_gpu_slots=total_gpu_slots,
         reserved_gpu_ids=reserved_gpu_ids,
@@ -11447,119 +11262,6 @@ def enrich_task_state(
         cpu_thread_limit=cpu_thread_limit,
         latest_states_by_key=latest_states_by_key,
     )
-    enriched.update(readiness)
-    lifecycle_state = task_lifecycle_state(enriched)
-    runtime_state = task_runtime_state(config, enriched)
-    if lifecycle_state == "queued":
-        enriched["blocked_reason"] = str(readiness.get("blocked_reason", "")).strip()
-        enriched["cpu_block_reason"] = str(readiness.get("cpu_block_reason", "")).strip()
-        enriched["gpu_block_reason"] = str(readiness.get("gpu_block_reason", "")).strip()
-        enriched["eligible_gpu_ids"] = parse_gpu_id_list(readiness.get("eligible_gpu_ids", []))
-        enriched["gpu_assignment_source"] = str(readiness.get("gpu_assignment_source", "")).strip()
-    else:
-        enriched["blocked_reason"] = ""
-        enriched["cpu_block_reason"] = ""
-        enriched["gpu_block_reason"] = ""
-        enriched["eligible_gpu_ids"] = (
-            parse_gpu_id_list(enriched.get("assigned_gpus", []))
-            if lifecycle_state == "running"
-            else []
-        )
-        enriched["gpu_assignment_source"] = recorded_gpu_assignment_source
-    dispatch_diagnostics = {
-        "scheduler_state": (
-            "blocked"
-            if lifecycle_state == "queued" and enriched["blocked_reason"]
-            else "eligible"
-            if lifecycle_state == "queued"
-            else "historical_after_launch"
-            if task_has_launch_metadata(enriched)
-            else "not_applicable"
-        ),
-        "blocked_reason": str(readiness.get("blocked_reason", "")).strip() if lifecycle_state == "queued" else "",
-        "cpu_block_reason": str(readiness.get("cpu_block_reason", "")).strip() if lifecycle_state == "queued" else "",
-        "gpu_block_reason": str(readiness.get("gpu_block_reason", "")).strip() if lifecycle_state == "queued" else "",
-        "eligible_gpu_ids": (
-            parse_gpu_id_list(readiness.get("eligible_gpu_ids", []))
-            if lifecycle_state == "queued"
-            else parse_gpu_id_list(enriched.get("assigned_gpus", []))
-            if lifecycle_state == "running"
-            else []
-        ),
-        "gpu_assignment_source": (
-            str(readiness.get("gpu_assignment_source", "")).strip()
-            if lifecycle_state == "queued"
-            else recorded_gpu_assignment_source
-        ),
-        "dependency_state": str(readiness.get("dependency_state", "")).strip(),
-        "dependency_resolution": readiness.get("dependency_resolution", []),
-        "artifact_state": str(readiness.get("artifact_state", "")).strip(),
-        "artifact_resolution": readiness.get("artifact_resolution", []),
-        "report_state": str(readiness.get("report_state", "")).strip(),
-        "report_resolution": readiness.get("report_resolution", []),
-        "dispatch_gpu_snapshot": list(enriched.get("dispatch_gpu_snapshot", [])),
-    }
-    launch_diagnostics = {
-        "launch_state": (
-            "launched"
-            if lifecycle_state == "running"
-            else "finished_awaiting_feedback"
-            if lifecycle_state == "awaiting_feedback"
-            else "finished"
-            if lifecycle_state in {"completed", "failed"} and task_has_launch_metadata(enriched)
-            else "launch_rejected"
-            if str(enriched.get("rejected_reason", "")).strip()
-            else "not_started"
-        ),
-        "started_at": str(enriched.get("started_at", "")).strip(),
-        "started_via_tmux_at": str(enriched.get("started_via_tmux_at", "")).strip(),
-        "why_started": str(enriched.get("why_started", "")).strip(),
-        "assigned_gpus": parse_gpu_id_list(enriched.get("assigned_gpus", [])),
-        "dispatch_gpu_snapshot": list(enriched.get("dispatch_gpu_snapshot", [])),
-        "launch_gpu_snapshot": list(enriched.get("launch_gpu_snapshot", [])),
-        "rejected_reason": str(enriched.get("rejected_reason", "")).strip(),
-    }
-    enriched["lifecycle_state"] = lifecycle_state
-    enriched["runtime_state"] = runtime_state
-    enriched["dispatch_diagnostics"] = dispatch_diagnostics
-    enriched["launch_diagnostics"] = launch_diagnostics
-    enriched["platform_recovery"] = task_platform_recovery_state(enriched)
-    enriched["automation_recommendation"] = task_automation_recommendation(enriched)
-    followup_present, followup_key = followup_entity_info(config, task_id)
-    enriched["followup_entity_present"] = followup_present
-    enriched["followup_entity_key"] = followup_key
-    followup_status = str(enriched.get("followup_status", "")).strip()
-    if followup_present:
-        enriched["followup_audit_status"] = "live_entity_present"
-    elif followup_status == "scheduled":
-        enriched["followup_audit_status"] = "state_scheduled_but_entity_missing"
-    elif followup_status == "stopped":
-        enriched["followup_audit_status"] = "stopped_no_entity"
-    elif followup_status == "resolved":
-        enriched["followup_audit_status"] = "resolved_no_entity"
-    else:
-        enriched["followup_audit_status"] = ""
-    phase = str(enriched.get("status", ""))
-    if lifecycle_state == "queued":
-        blocked_reason = str(dispatch_diagnostics.get("blocked_reason", "")).strip()
-        if blocked_reason.startswith("dependency:"):
-            phase = "blocked_by_dependency"
-        elif blocked_reason.startswith("artifact:"):
-            phase = "waiting_artifact"
-        elif blocked_reason.startswith("report:"):
-            phase = "waiting_report"
-        elif blocked_reason.startswith("cpu_budget:"):
-            phase = "blocked_by_cpu_budget"
-        elif blocked_reason.startswith("gpu_headroom:"):
-            phase = "blocked_by_gpu_headroom"
-        else:
-            phase = "eligible"
-    elif lifecycle_state == "running":
-        phase = "running"
-    elif lifecycle_state == "awaiting_feedback":
-        phase = "awaiting_feedback"
-    enriched["phase"] = phase
-    return enriched
 
 
 def merged_spec_with_state(config: AppConfig, state: dict[str, Any]) -> dict[str, Any]:
@@ -13168,76 +12870,13 @@ def submit_spec_unlocked(config: AppConfig, spec: dict[str, Any], *, hold: bool 
     append_log(task_runner_log_path(config, task_id), f"task_submitted session={tmux_session_name} workdir={workdir} hold={hold}")
     if duplicate_warning:
         append_log(task_runner_log_path(config, task_id), f"duplicate_submit_override warning={duplicate_warning}")
-    gpu_rows = get_gpu_summary_table()
-    total_gpu_slots = detect_gpu_count() or len(gpu_rows)
-    active_states = [item for item in iter_task_states(config) if str(item.get("status", "")) in ACTIVE_TASK_STATUSES]
-    active_cpu_threads = sum(task_requested_cpu_budget(merged_spec_with_state(config, item)) for item in active_states)
-    active_reserved_gpu_ids: set[int] = set()
-    for item in active_states:
-        active_reserved_gpu_ids.update(parse_gpu_id_list(item.get("assigned_gpus", [])))
-    readiness = evaluate_task_readiness(
+    return finalize_submitted_task_impl(
         config,
         normalized_spec,
-        gpu_rows=gpu_rows,
-        total_gpu_slots=total_gpu_slots,
-        reserved_gpu_ids=active_reserved_gpu_ids,
-        active_cpu_threads=active_cpu_threads,
-        cpu_thread_limit=detect_default_cpu_thread_limit(),
+        state,
+        hold=hold,
+        hooks=scheduler_submit_hooks(),
     )
-    submitted_and_dispatch_attempted = False
-    if hold:
-        response = enrich_task_state(
-            config,
-            state,
-            gpu_rows=gpu_rows,
-            total_gpu_slots=total_gpu_slots,
-            active_cpu_threads=active_cpu_threads,
-            cpu_thread_limit=detect_default_cpu_thread_limit(),
-        )
-        response["held"] = True
-        response["submitted_and_dispatch_attempted"] = False
-        return response
-    if readiness["blocked_reason"]:
-        queued_state = merge_task_state(config, task_id, status="queued")
-        response = enrich_task_state(
-            config,
-            queued_state,
-            gpu_rows=gpu_rows,
-            total_gpu_slots=total_gpu_slots,
-            active_cpu_threads=active_cpu_threads,
-            cpu_thread_limit=detect_default_cpu_thread_limit(),
-        )
-        response["held"] = False
-        response["submitted_and_dispatch_attempted"] = False
-        return response
-    submitted_and_dispatch_attempted = True
-    cpu_assignment = select_cpu_resources_for_start(
-        normalized_spec,
-        available_cpu_threads=int(readiness.get("available_cpu_threads", 0) or 0),
-    )
-    started_state = start_existing_task(
-        config,
-        task_id,
-        assigned_gpus=readiness["eligible_gpu_ids"] or None,
-        assignment_source=readiness["gpu_assignment_source"],
-        assigned_cpu_threads=int(cpu_assignment.get("assigned_cpu_threads", 0) or 0) or None,
-        assigned_cpu_workers=int(cpu_assignment.get("assigned_cpu_workers", 0) or 0) or None,
-        cpu_assignment_source=str(cpu_assignment.get("cpu_thread_source", "") or readiness.get("cpu_thread_source", "") or "default"),
-        cpu_worker_assignment_source=str(cpu_assignment.get("cpu_worker_source", "") or readiness.get("cpu_worker_source", "") or "default"),
-        why_started="submit_no_blockers",
-        dispatch_gpu_snapshot=selected_gpu_snapshot(gpu_rows, readiness["eligible_gpu_ids"]) if readiness["eligible_gpu_ids"] else [],
-    )
-    response = enrich_task_state(
-        config,
-        started_state,
-        gpu_rows=gpu_rows,
-        total_gpu_slots=total_gpu_slots,
-        active_cpu_threads=active_cpu_threads,
-        cpu_thread_limit=detect_default_cpu_thread_limit(),
-    )
-    response["held"] = False
-    response["submitted_and_dispatch_attempted"] = submitted_and_dispatch_attempted
-    return response
 
 
 def submit_spec(config: AppConfig, spec: dict[str, Any], *, hold: bool = False) -> dict[str, Any]:
@@ -13731,6 +13370,45 @@ def build_task_result_payload(config: AppConfig, task_id: str) -> dict[str, Any]
     return build_task_result_payload_impl(config, task_id, hooks=task_result_hooks())
 
 
+def scheduler_dispatch_hooks() -> SchedulerDispatchHooks:
+    return SchedulerDispatchHooks(
+        iter_task_states=iter_task_states,
+        count_live_running_tasks=count_live_running_tasks,
+        detect_default_cpu_thread_limit=detect_default_cpu_thread_limit,
+        task_requested_cpu_budget=task_requested_cpu_budget,
+        merged_spec_with_state=merged_spec_with_state,
+        detect_gpu_count=detect_gpu_count,
+        parse_gpu_id_list=parse_gpu_id_list,
+        get_gpu_summary_table=get_gpu_summary_table,
+        active_task_statuses=ACTIVE_TASK_STATUSES,
+        runnable_statuses=RUNNABLE_STATUSES,
+        timestamp_sort_value=timestamp_sort_value,
+        evaluate_task_readiness=evaluate_task_readiness,
+        select_cpu_resources_for_start=select_cpu_resources_for_start,
+        start_existing_task=start_existing_task,
+        selected_gpu_snapshot=selected_gpu_snapshot,
+    )
+
+
+def scheduler_submit_hooks() -> SchedulerSubmitHooks:
+    return SchedulerSubmitHooks(
+        iter_task_states=iter_task_states,
+        active_task_statuses=ACTIVE_TASK_STATUSES,
+        task_requested_cpu_budget=task_requested_cpu_budget,
+        merged_spec_with_state=merged_spec_with_state,
+        parse_gpu_id_list=parse_gpu_id_list,
+        get_gpu_summary_table=get_gpu_summary_table,
+        detect_gpu_count=detect_gpu_count,
+        detect_default_cpu_thread_limit=detect_default_cpu_thread_limit,
+        evaluate_task_readiness=evaluate_task_readiness,
+        enrich_task_state=enrich_task_state,
+        select_cpu_resources_for_start=select_cpu_resources_for_start,
+        start_existing_task=start_existing_task,
+        selected_gpu_snapshot=selected_gpu_snapshot,
+        merge_task_state=merge_task_state,
+    )
+
+
 def reserve_cpu_threads_for_later_tasks(
     config: AppConfig,
     queued_items: list[tuple[dict[str, Any], dict[str, Any]]],
@@ -13743,28 +13421,18 @@ def reserve_cpu_threads_for_later_tasks(
     reserved_cpu_threads: int,
     cpu_thread_limit: int,
 ) -> int:
-    reserve = 0
-    future_reserved_gpu_ids = set(reserved_gpu_ids)
-    for future_state, future_spec in queued_items[start_index + 1 :]:
-        readiness = evaluate_task_readiness(
-            config,
-            future_spec,
-            gpu_rows=gpu_rows,
-            total_gpu_slots=total_gpu_slots,
-            reserved_gpu_ids=future_reserved_gpu_ids,
-            active_cpu_threads=active_cpu_threads,
-            reserved_cpu_threads=reserved_cpu_threads + reserve,
-            cpu_thread_limit=cpu_thread_limit,
-        )
-        if readiness["blocked_reason"]:
-            continue
-        required_budget = max(0, int(readiness.get("cpu_budget", 0) or 0))
-        if required_budget > 0:
-            reserve += required_budget
-        eligible_gpu_ids = parse_gpu_id_list(readiness.get("eligible_gpu_ids", []))
-        if eligible_gpu_ids:
-            future_reserved_gpu_ids.update(eligible_gpu_ids)
-    return reserve
+    return reserve_cpu_threads_for_later_tasks_impl(
+        config,
+        queued_items,
+        hooks=scheduler_dispatch_hooks(),
+        start_index=start_index,
+        gpu_rows=gpu_rows,
+        total_gpu_slots=total_gpu_slots,
+        reserved_gpu_ids=reserved_gpu_ids,
+        active_cpu_threads=active_cpu_threads,
+        reserved_cpu_threads=reserved_cpu_threads,
+        cpu_thread_limit=cpu_thread_limit,
+    )
 
 
 def dispatch_queued_tasks_unlocked(
@@ -13776,172 +13444,15 @@ def dispatch_queued_tasks_unlocked(
     gpu_count_override: int,
     cpu_thread_limit: int,
 ) -> dict[str, Any]:
-    states = iter_task_states(config)
-    running_count = count_live_running_tasks(config, states)
-    active_states = [state for state in states if str(state.get("status", "")) in ACTIVE_TASK_STATUSES]
-    resolved_cpu_thread_limit = int(cpu_thread_limit or 0) if int(cpu_thread_limit or 0) > 0 else detect_default_cpu_thread_limit()
-    active_cpu_threads = sum(task_requested_cpu_budget(merged_spec_with_state(config, state)) for state in active_states)
-    total_gpu_slots = gpu_count_override if gpu_count_override > 0 else detect_gpu_count()
-    active_gpu_slots = sum(int(state.get("gpu_slots", 0) or 0) for state in active_states)
-    active_reserved_gpu_ids: set[int] = set()
-    for state in active_states:
-        active_reserved_gpu_ids.update(parse_gpu_id_list(state.get("assigned_gpus", [])))
-    gpu_rows = get_gpu_summary_table()
-    if gpu_count_override > 0 and gpu_rows:
-        gpu_rows = [row for row in gpu_rows if int(row.get("index", -1)) < gpu_count_override]
-    headroom_scheduler = mode == "gpu-fill" and total_gpu_slots > 0 and bool(gpu_rows)
-    if mode == "serial":
-        capacity = 0 if running_count > 0 else 1
-    elif mode == "gpu-fill":
-        hard_task_limit = max_running if max_running > 0 else max(limit, 1)
-        capacity = max(0, hard_task_limit - running_count)
-    else:
-        raise ValueError(f"Unsupported dispatch mode: {mode}")
-    started: list[str] = []
-    errors: list[str] = []
-    placements: dict[str, list[int]] = {}
-    if capacity <= 0:
-        return {
-            "started": started,
-            "errors": errors,
-            "running_count": running_count,
-            "capacity": capacity,
-            "mode": mode,
-            "active_gpu_slots": active_gpu_slots,
-            "total_gpu_slots": total_gpu_slots,
-            "active_cpu_threads": active_cpu_threads,
-            "cpu_thread_limit": resolved_cpu_thread_limit,
-            "headroom_scheduler": headroom_scheduler,
-            "placements": placements,
-            "cpu_assignments": {},
-        }
-    queued = [
-        (
-            state,
-            merged_spec_with_state(config, state),
-        )
-        for state in sorted(
-            states,
-            key=lambda item: (
-                -int(item.get("priority", 0) or 0),
-                timestamp_sort_value(item.get("submitted_at"), missing=float("inf")),
-                str(item.get("task_id", "")),
-            ),
-        )
-        if str(state.get("status", "")) in RUNNABLE_STATUSES
-    ]
-    reserved_gpu_ids: set[int] = set(active_reserved_gpu_ids)
-    reserved_cpu_threads = 0
-    remaining_gpu_slots = max(0, total_gpu_slots - active_gpu_slots) if total_gpu_slots > 0 else 0
-    started_limit = min(capacity, limit)
-    cpu_assignments: dict[str, int] = {}
-    for index, (state, spec) in enumerate(queued):
-        if len(started) >= started_limit:
-            break
-        task_id = str(state["task_id"])
-        readiness = evaluate_task_readiness(
-            config,
-            spec,
-            gpu_rows=gpu_rows if headroom_scheduler else None,
-            total_gpu_slots=total_gpu_slots,
-            reserved_gpu_ids=reserved_gpu_ids,
-            active_cpu_threads=active_cpu_threads,
-            reserved_cpu_threads=reserved_cpu_threads,
-            cpu_thread_limit=resolved_cpu_thread_limit,
-        )
-        if readiness["blocked_reason"]:
-            continue
-        gpu_slots = int(state.get("gpu_slots", 0) or 0)
-        assigned_gpus: list[int] | None = readiness["eligible_gpu_ids"] or None
-        assignment_source = readiness["gpu_assignment_source"]
-        cpu_assignment = select_cpu_resources_for_start(
-            spec,
-            available_cpu_threads=int(readiness.get("available_cpu_threads", 0) or 0),
-        )
-        assigned_cpu_threads = int(cpu_assignment.get("assigned_cpu_threads", 0) or 0)
-        assigned_cpu_workers = int(cpu_assignment.get("assigned_cpu_workers", 0) or 0)
-        assigned_cpu_budget = int(cpu_assignment.get("assigned_cpu_budget", 0) or 0)
-        cpu_assignment_source = str(cpu_assignment.get("cpu_thread_source", "") or readiness.get("cpu_thread_source", "") or "default")
-        cpu_worker_assignment_source = str(cpu_assignment.get("cpu_worker_source", "") or readiness.get("cpu_worker_source", "") or "default")
-        if (
-            gpu_slots <= 0
-            and (
-                str(readiness.get("cpu_threads_mode", "fixed")) == "adaptive"
-                or str(readiness.get("cpu_worker_policy", {}).get("mode", "fixed")) == "adaptive"
-            )
-        ):
-            reserve_for_later = reserve_cpu_threads_for_later_tasks(
-                config,
-                queued,
-                start_index=index,
-                gpu_rows=gpu_rows if headroom_scheduler else None,
-                total_gpu_slots=total_gpu_slots,
-                reserved_gpu_ids=reserved_gpu_ids,
-                active_cpu_threads=active_cpu_threads,
-                reserved_cpu_threads=reserved_cpu_threads,
-                cpu_thread_limit=resolved_cpu_thread_limit,
-            )
-            cpu_assignment = select_cpu_resources_for_start(
-                spec,
-                available_cpu_threads=int(readiness.get("available_cpu_threads", 0) or 0),
-                reserve_for_other_tasks=reserve_for_later,
-            )
-            assigned_cpu_threads = int(cpu_assignment.get("assigned_cpu_threads", 0) or 0)
-            assigned_cpu_workers = int(cpu_assignment.get("assigned_cpu_workers", 0) or 0)
-            assigned_cpu_budget = int(cpu_assignment.get("assigned_cpu_budget", 0) or 0)
-            cpu_assignment_source = str(cpu_assignment.get("cpu_thread_source", "") or readiness.get("cpu_thread_source", "") or "default")
-            cpu_worker_assignment_source = str(cpu_assignment.get("cpu_worker_source", "") or readiness.get("cpu_worker_source", "") or "default")
-        if mode == "gpu-fill" and gpu_slots > 0 and not headroom_scheduler and total_gpu_slots > 0 and gpu_slots > remaining_gpu_slots:
-            continue
-        try:
-            if assigned_gpus is not None or assignment_source:
-                start_existing_task(
-                    config,
-                    task_id,
-                    assigned_gpus=assigned_gpus,
-                    assignment_source=assignment_source,
-                    assigned_cpu_threads=assigned_cpu_threads or None,
-                    assigned_cpu_workers=assigned_cpu_workers or None,
-                    cpu_assignment_source=cpu_assignment_source,
-                    cpu_worker_assignment_source=cpu_worker_assignment_source,
-                    why_started=f"dispatch_{mode}",
-                    dispatch_gpu_snapshot=selected_gpu_snapshot(gpu_rows, assigned_gpus or []),
-                )
-            else:
-                start_existing_task(
-                    config,
-                    task_id,
-                    assigned_cpu_threads=assigned_cpu_threads or None,
-                    assigned_cpu_workers=assigned_cpu_workers or None,
-                    cpu_assignment_source=cpu_assignment_source,
-                    cpu_worker_assignment_source=cpu_worker_assignment_source,
-                    why_started=f"dispatch_{mode}",
-                )
-            started.append(task_id)
-            if assigned_gpus:
-                placements[task_id] = assigned_gpus
-                reserved_gpu_ids.update(assigned_gpus)
-            reserved_cpu_threads += assigned_cpu_budget or int(readiness.get("cpu_budget", 0) or 0)
-            if assigned_cpu_budget:
-                cpu_assignments[task_id] = assigned_cpu_budget
-            if mode == "gpu-fill" and total_gpu_slots > 0 and not headroom_scheduler:
-                remaining_gpu_slots = max(0, remaining_gpu_slots - gpu_slots)
-        except Exception as exc:
-            errors.append(f"{task_id}: {exc}")
-    return {
-        "started": started,
-        "errors": errors,
-        "running_count": running_count,
-        "capacity": capacity,
-        "mode": mode,
-        "active_gpu_slots": active_gpu_slots,
-        "total_gpu_slots": total_gpu_slots,
-        "active_cpu_threads": active_cpu_threads,
-        "cpu_thread_limit": resolved_cpu_thread_limit,
-        "headroom_scheduler": headroom_scheduler,
-        "placements": placements,
-        "cpu_assignments": cpu_assignments,
-    }
+    return dispatch_queued_tasks_unlocked_impl(
+        config,
+        hooks=scheduler_dispatch_hooks(),
+        mode=mode,
+        max_running=max_running,
+        limit=limit,
+        gpu_count_override=gpu_count_override,
+        cpu_thread_limit=cpu_thread_limit,
+    )
 
 
 def dispatch_queued_tasks(

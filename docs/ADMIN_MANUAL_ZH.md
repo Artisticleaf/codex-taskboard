@@ -263,6 +263,19 @@ API 服务由 `serve-api` 提供，当前默认暴露：
 - result-only token 不能绑定 Codex session
 - `/submit-job` 默认带 duplicate-submit guard：如果同一 `codex_session_id + proposal_path + command` 已有 live task，API 会拒绝重复提交；只有在调用方确认 authoritative task 后，才应显式传 `allow_duplicate_submit=true`
 
+真实 rootless container 租户的回归 smoke 可直接运行：
+
+```bash
+.venv/bin/python extras/smoke/real_docker_api_smoke.py
+```
+
+这个脚本会默认自动探测本机 `podman`/`docker` 和可用 docker tenant（可用 `--runtime` / `--docker-user` 覆盖），并验证：
+
+- 容器内 GPU 设备不可见；
+- tenant 仍可通过 API 提交 hold 队列任务和普通任务；
+- `/queue` 可看到共享排队任务；
+- `/tasks` / `status-result` 只能看到本 tenant 自己的已完成任务。
+
 ## 7. API token 注册
 
 注册表路径：
