@@ -1,0 +1,569 @@
+Metadata-Version: 2.4
+Name: codex-taskboard
+Version: 0.1.0
+Summary: Tmux-backed task orchestration and terminal dashboard for Codex agents on Ubuntu
+Author: OpenAI Codex + Awei
+License: MIT
+Keywords: codex,tmux,orchestration,dashboard,agent
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: System :: Monitoring
+Classifier: Topic :: Software Development :: Build Tools
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# codex-taskboard
+
+`codex-taskboard` 是一个面向 Codex/科研代理工作流的本地任务编排器。它负责把 shell 任务、外部 PID、子 agent、容器 API 提交统一放进同一个队列，按 GPU/CPU 资源调度，并在任务结束后把结果安全地回传到对应会话。
+
+## taskboard-light 口径
+
+如果你只关心“怎么让 agent 稳定自动推进科研”，先看这一段就够了：
+
+- 当前 runtime 对 agent 的后台唤起，默认只保留一个最小合同：异常 canonical head 提示、单次出现的绑定路径、单次出现的写回要求、单次出现的 `Taskboard 操作方法`、固定“轻度科研约定”、continuous 收口补充句、固定协议尾注。
+- fixed “轻度科研约定” 的核心内容就是：先吸收本轮回流；默认在当前长上下文完成本地读取、数据处理、可靠性审计、proposal/history 写回与必要文献对照；结果可疑就先回查代码逻辑、数据契约、数据泄漏、评测污染、split 错位、run 完整性。
+- 可靠结果先写 proposal，再决定是否升级进 history；写作要求保持正式科研语体，并把内部缩写、实验代号、结果和结论讲人话。
+- 一旦形成可执行实验包，就先完成严格代码审计与 smoke test；GPU 实验默认按 4 卡高吞吐规划，并尽量把 GPU 利用率优化到较高水平后再正式发车。
+- CPU-only 数据处理/审计/小修复默认留在当前对话；正式 GPU/remote/async 任务交给 taskboard。`submit` / `bind-before-launch` 默认配合 tmux 托管，已在 tmux 中启动的进程可用 `attach-pid` 接管；所有正式实验建议优先使用 tmux。
+- 若同一 `codex_session_id + proposal_path + command` 已有 `queued/submitted/running/watching` 任务，taskboard 默认阻止重复提交；只有在你确认 authoritative 任务状态之后，才应显式加 `--allow-duplicate-submit`（API 为 `allow_duplicate_submit=true`）。
+- continuous 模式下，当前方向收口或无信息增益时，不是停机，而是先把分析和收口理由写进 history，再拟定新 proposal，并在提交下一阶段受托管实验后用 `NEW_TASKS_STARTED` 完成转场。
+
+当前版本的“防呆”主要靠下面几层：
+
+- `pending_feedback` / `queued feedback`：会话忙、429 或最近有活动时，结果先排队，不丢回流。
+- `continuous mode`：agent 中断后仍会按同一 proposal/history 继续唤起，而不是要求重新起一套上下文。
+- `bind-before-launch` / `attach-pid`：防止本地长任务因为 agent 中断而脱离生命周期管理。
+- `human-guidance` / `migrate-session`：人工接管和 session 切换时，保持 followup、回流和绑定关系不丢。
+
+更短的说明见 `docs/taskboard-light/README_ZH.md`。
+
+当前版本的重点能力：
+
+- 同一 `session` 的自动回传串行化，避免多个结果同时撞同一对话。
+- `pending_feedback` 改为按 `session` 聚合，同批完成的任务只发一次 consolidated prompt。
+- 若历史异常导致 `queued_feedback` followup 实体缺失，dispatcher 会依据任务状态自动补建并恢复回传。
+- continuous / followup 调度以 `codex_session_id` 为主；即使 `agent_name` 为空，只要 session 绑定存在，后续自动唤起仍可继续。
+- 同一 `codex_session_id + proposal_path + command` 的 live task 现在默认启用 duplicate-submit guard，避免同一会话在主链 proposal 上重复排同一实验。
+- proposal 绑定与自动继承，支持主链路和 sidecar 辅助任务共享同一个实验规划文件。
+- 新增 `inline-first` 微步骤策略：
+  - 预计 60 秒内完成、无需 GPU、只依赖当前已落盘本地工件、无需异步等待或未来 callback 的 CPU-only 审查/写回/脚本执行，默认直接在当前回合完成并吸收结果。
+  - 连续 2-5 个这类短步骤可以在同一上下文批量做完后，再统一刷新主 `history/proposal` 与 queue hygiene；但“2-5 个”只是经验批量，不是 KPI，真正目标是把同一 work package 中当前能立即完成并能吸收结果的本地动作尽量一次做完。
+  - proposal 的高门槛只约束“新 proposal / 新 async / route-level 物化”，不阻断当前 proposal 内的数据处理、证据分析或局部改写。
+  - taskboard 的 live task 重点留给真实验证实验：包括 GPU 训练、多卡评测、远程执行、长时任务，以及已经具备独立验证价值、值得 receipt 留痕的短实验。
+- 新增多类机器可读工作流信号与更短的后台 prompt 合同：
+  - `TASKBOARD_SIGNAL=LOCAL_CONTINUE_NO_WAKE`：agent 仍在同一认知线程内推进；taskboard 不应额外创建 local reminder，不应累计 `repeated_local_action_without_new_evidence`，也不应因为“没有新外部证据”而诱导 `parked/idle`。
+  - `TASKBOARD_SIGNAL=LOCAL_MICROSTEP_BATCH`：显式请求 taskboard 在短延迟后再次外部重入当前会话；它不是“停机按钮”，而是“请稍后从外部再叫醒我一次”。
+  - `TASKBOARD_SIGNAL=MATERIALS_READY_FOR_PROPOSAL`：当前轮已经完成 hypothesis / proposal 的理论材料整理；taskboard 会切到一个更聚焦的 proposal materialization / dispatch followup，推动 agent 尽快固化 proposal/history 并绑定首个验证实验。
+  - `TASKBOARD_SIGNAL=WAITING_ON_ASYNC`：当前轮已经提交或确认了等价 async / live task，此时只是等待它的生命周期自动回流，不应再被反复催促“再分发一个任务”。
+  - `WAITING_ON_FEEDBACK`：新的 continuous/status/observability 等待态，表示计算已结束，但 receipt 仍待当前 session 吸收；它不是 agent 需要输出的 `FINAL_SIGNAL`，也不应再被误读成 live compute 仍在运行。
+  - `TASKBOARD_SIGNAL=PARKED_IDLE`：当前 proposal 已 parked，且没有新 evidence、没有 live task、canonical head 未变化；continuous mode 会先挂一条短延迟 recheck，要求 agent 再做一次 bounded self-review；若仍无增益，再进入更长的 watchdog/backoff，而不是永久沉默。
+- 当前后台 prompt 不再同时注入长版 `Taskboard protocol card`、`Taskboard quick memory` 和重复执行闭环：
+  - canonical head 只在异常时才提示，避免正常回流被固定头部刷屏；
+  - `proposal_file / closeout_proposal_dir / project_history_file / project_history_log_dir` 只打印一次；
+  - `Taskboard 操作方法` 固定为：本地 CPU-only 留在当前对话；正式实验用 `submit`；跨回复本地长任务用 `bind-before-launch` / `attach-pid`；正式实验默认建议 tmux；
+  - prompt 仍要求 agent 在回复末尾输出结构化自检行，例如 `TASKBOARD_PROTOCOL_ACK=TBP1`、`CURRENT_STEP_CLASS=...`、`TASKBOARD_SELF_CHECK=...`、`LIVE_TASK_STATUS=...`、`FINAL_SIGNAL=...`；
+  - 如果 assistant 忘写独立的 `TASKBOARD_SIGNAL=...`，taskboard 仍会回退解析 `FINAL_SIGNAL=...`；
+  - 如果 assistant 没给出合法协议尾部，taskboard 会发一个极短的 `protocol_self_check_repair` followup，把它拉回协议，而不是继续静默漂移。
+- 新增 `human-guidance` 人工干预暂停通道：
+  - 可以按 session 暂停自动 `followup/resume/continuous reminder`，让人工在 VSCode 线程里直接 steer agent，不被后台回流打断。
+  - pause 期间后台结果继续排队，不会丢失；解除 pause 后再统一吸收。
+  - `dashboard` 里新增 `h` 快捷键，CLI 里新增 `human-guidance` 命令。
+- Docker/API 用户可不绑定 agent，只提交任务、排队、查队列、取结果；其中普通 Docker token 可选择查看共享 `/queue` 视图了解当前排队压力，但已完成结果仍按 tenant 隔离。
+- 新增“持续推进科研”模式：
+  - 模式关闭时，`TASKBOARD_SIGNAL=NO_FURTHER_TASKS` 仍表示停止自动追问。
+  - 模式开启时，`TASKBOARD_SIGNAL=NO_FURTHER_TASKS`、`STOP_AUTOMATION`、`END_EXPERIMENT` 都不再直接停机，而会触发一次“收口转下一阶段” followup。
+  - 如果最近时间日志已经把唯一下一跳明确写成 `launch spec / runner spec / config materialization / proposal 骨架` 这类本地工件，continuous followup 会明确要求 agent 本轮直接把工件写出来，而不是整轮只复述动作名。
+  - 如果当前只是 `parked continuity + no new evidence + no live task`，system 会先安排一次短延迟 recheck；若仍无增益，再进入 `PARKED_IDLE` 的更长 watchdog/backoff，而不是永久停住。
+  - 若 parked watchdog 读到最近时间日志的 `Next bounded action` 已经转成 `新 family 设计 / successor hypothesis / proposal 骨架 / route replanning / 最小 pilot gate` 这一类 CPU-only successor bootstrap，status 会把 recommendation 提升为 `materialize_successor_proposal`，避免 parked 死锁。
+  - 若最近时间日志已经把状态推进到“CPU-only 材料已齐、下一步只差显式绑定/提交 live task”，parser 与 continuous scheduler 会把它识别为 dispatch-ready，并自动切到 `MATERIALS_READY_FOR_PROPOSAL` followup，而不是继续留在 `LOCAL_CONTINUE_NO_WAKE` / `LOCAL_MICROSTEP_BATCH` 或误报 `conflict`。
+  - 若 agent 已经把 successor 材料整理完成并返回 `TASKBOARD_SIGNAL=MATERIALS_READY_FOR_PROPOSAL`，taskboard 会进入专用 materialization followup，并把 recommendation 提升为 `finish_proposal_dispatch`，要求 agent 固化 proposal/history 并尽快提交首个验证实验或受托管任务。
+  - 这条 followup 会持续要求 agent：写论文级 closeout、补 history、分析优势/不足/可疑点、生成下一阶段 proposal、绑定 taskboard，并把理论工作转成真实实验验证。
+  - 新 proposal 现在必须是“分阶段、分决策分支、带实现细节的实验规划书”，要明确阶段目标、实验包、决策点、分支切换条件、实现要点、代码/数据改动、验证指标与停止条件。
+  - 只有当 agent 已经完成上述转场，并且至少提交了一条下一阶段验证实验或受托管任务 时，才应输出 `TASKBOARD_SIGNAL=NEW_TASKS_STARTED` 让 taskboard 结束这条转场 followup。
+- 新增管理员手动 session cutover：
+  - 使用 `migrate-session` 可以把 taskboard 对旧 session 的责任整体迁到新 session，包括非隐藏 task 记录、followup、continuous/human-guidance 绑定，以及被中断回流的缓冲状态。
+  - cutover 期间 taskboard 会精确中断自己发起的旧 session 回流子进程，并把受影响状态标成 `buffered_session_migration_cutover`，后续统一由新 session 接手。
+- 提交真实任务时应优先使用已安装的 `codex-taskboard` 可执行入口；不要直接用 `python src/codex_taskboard/cli.py submit` 发即时 sidecar。后者在 tmux / 多解释器环境下可能让短生命周期任务落入 `stale_state:supervisor_missing`。
+- dispatcher 的 systemd unit 现在应使用 `KillMode=process`，这样热重启调度器时只会替换主循环，不会顺手杀掉已绑定的训练/评测子进程；新 dispatcher 会继续继承磁盘状态和现有 live task。
+
+## 快速开始
+
+```bash
+cd /home/ubunut/awei/codex-taskboard
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/codex-taskboard doctor
+```
+
+## 入口约定
+
+为避免误会“是不是装了两份 taskboard”，这里把入口约定明确写死：
+
+- 唯一真实代码来源是仓库里的 [`src/codex_taskboard/cli.py`](./src/codex_taskboard/cli.py)。
+- 唯一真实运行环境是仓库自己的 `.venv`，也就是 `/home/ubunut/awei/codex-taskboard/.venv/bin/codex-taskboard`。
+- 如果系统里存在 `/usr/local/bin/codex-taskboard`，它应当只是一个转发壳，作用是方便你在任意目录直接敲 `codex-taskboard`；它不应是另一份独立安装的 Python 包。
+- 生产服务的 systemd `ExecStart` 应直接指向仓库 `.venv/bin/codex-taskboard`，不要再额外指向第二个 Python 环境。
+
+说人话：
+
+- 终端里你可能看到两个路径：
+  - `/usr/local/bin/codex-taskboard`
+  - `/home/ubunut/awei/codex-taskboard/.venv/bin/codex-taskboard`
+- 这不表示有两套代码。
+- 正确约定是：前者只是快捷入口，后者才是真正执行程序的入口；两者最终都应该落到同一份仓库代码。
+
+建议排查方式：
+
+```bash
+which -a codex-taskboard
+head -n 5 /usr/local/bin/codex-taskboard
+.venv/bin/python - <<'PY'
+import codex_taskboard.cli
+print(codex_taskboard.cli.__file__)
+PY
+```
+
+如果输出的真实代码路径不是仓库里的 `src/codex_taskboard/cli.py`，那才说明机器上真的出现了多版本混用。
+
+上线新代码到系统服务时，不要只改磁盘文件：运行中的 Python 进程不会热替换已加载模块。生产部署应保持同一组 systemd unit（`codex-taskboard-api.service` / `codex-taskboard-dispatcher.service`）不变，并在代码更新后执行一次同服务重启切换：
+
+```bash
+sudo systemctl restart codex-taskboard-api.service codex-taskboard-dispatcher.service
+systemctl show codex-taskboard-api.service -p MainPID -p ExecStart
+systemctl show codex-taskboard-dispatcher.service -p MainPID -p ExecStart
+.venv/bin/codex-taskboard service doctor
+```
+
+校验标准：`ExecStart` 仍指向仓库 `.venv/bin/codex-taskboard service run ...`，`MainPID` 已切换到新进程，且 `service doctor` 不应再报告 `serve-api.pid` / `serve.pid` 漂移或 API 端口被 systemd 之外的进程占用。
+
+常用命令：
+
+```bash
+.venv/bin/codex-taskboard dashboard
+.venv/bin/codex-taskboard current-thread
+.venv/bin/codex-taskboard continuous-mode status
+.venv/bin/codex-taskboard continuous-mode on --session-id <codex_session_id>
+.venv/bin/codex-taskboard continuous-mode off --session-id <codex_session_id>
+.venv/bin/codex-taskboard continuous-mode bind --session-id <new_codex_session_id>
+.venv/bin/codex-taskboard continuous-mode clear-session --session-id <old_codex_session_id>
+.venv/bin/codex-taskboard human-guidance status
+.venv/bin/codex-taskboard human-guidance on --session-id <codex_session_id> --lease-seconds 900 --reason "manual steer"
+.venv/bin/codex-taskboard human-guidance off --session-id <codex_session_id>
+.venv/bin/codex-taskboard migrate-session --from-session-id <old_codex_session_id> --to-session-id <new_codex_session_id>
+.venv/bin/codex-taskboard bind-before-launch --task-id local-audit --workdir /path/to/project --command 'python audit.py'
+```
+
+## 机器可读状态面
+
+新版本除了保留人类可读的 `dashboard` / `status` 外，也把更多运行态细节稳定暴露到 JSON 接口里。对自动科研、外部 API 调用方和脚本来说，建议按下面口径解释：
+
+### 任务状态 JSON
+
+`codex-taskboard status --json` 与 `codex-taskboard status-result` 现在会返回一组更细的状态字段：
+
+- `status`
+  - 面向用户的粗粒度状态，例如 `queued`、`running`、`completed`、`failed`。
+- `lifecycle_state`
+  - 更适合机器判断当前生命周期，例如 `running`、`awaiting_feedback`、`completed`。
+- `runtime_state`
+  - 当前运行子状态，例如 `child_live`、`awaiting_feedback`、`none`。
+- `dispatch_diagnostics`
+  - 调度器侧的历史判定快照；任务已经启动后，这里可能保留 `historical_after_launch` 等历史字段，不应单独拿它判断“任务是否还没跑起来”。
+- `launch_diagnostics`
+  - 真实 launch/finish 视角的快照，更适合确认任务是否已经真正启动、结束或进入 `awaiting_feedback`。
+- `platform_recovery`
+  - 平台级自动恢复信息，例如 429 / provider transient / transport retry 是否正在发生。
+- `automation_recommendation`
+  - taskboard 当前建议的自动化动作，例如 `wait_for_live_task`、`absorb_completed_receipt`。
+
+推荐解释规则：
+
+- 判断“任务是否真的还活着”，优先看 `lifecycle_state`、`runtime_state`、`started_at`、`ended_at`。
+- 不要只看 `blocked_reason` / `gpu_block_reason`，因为这些字段可能只是 launch 前或历史调度快照。
+- 如果 `status=completed`，但 `lifecycle_state=awaiting_feedback`，表示计算已经完成，但结果仍在等待 agent 吸收/回写。
+- 如果 `platform_recovery.state != none`，应先按平台/上游错误处理，而不是直接把它当 scientific negative result。
+
+### continuous-mode 状态 JSON
+
+`codex-taskboard continuous-mode status --json` 现在也会给出更适合自动科研编排的字段：
+
+- `effective_wait_state`
+- `effective_last_signal`
+- `running_task_count` / `running_task_ids`
+- `proposal_bound_running_task_count` / `proposal_bound_running_task_ids`
+- `awaiting_feedback_task_count` / `awaiting_feedback_task_ids`
+- `human_guidance_active`
+- `automation_recommendation`
+- 兼容字段：`live_task_count` / `proposal_bound_live_task_count` / `pending_feedback_live_task_count` 仍会返回，但新自动化应迁移到 `running_*` / `awaiting_feedback_*` 口径。
+
+推荐解释规则：
+
+- `WAITING_ON_ASYNC` 统一覆盖已提交或已确认存在的等价 async / live task，本轮不应再平行制造等价任务。
+- `WAITING_ON_FEEDBACK` 表示计算已经结束，但 receipt 仍待当前 session 吸收；这不是 live compute 仍在运行。
+- 若 `awaiting_feedback_task_count > 0` 且 `running_task_count = 0`，优先做 evidence-first 吸收，而不是继续扩任务。
+- 若 `human_guidance_active=true`，后台应只排队，不打断当前人工 steering。
+- followup scheduler 现在会在 `followup.log` 与对应 reminder JSON 中同步写入 `scheduled/deferred/suppressed/resumed`、`reason`、`effective_wait_state`、`running_task_count`、`awaiting_feedback_task_count`，便于定位“为什么被再次唤起/为什么被延后/为什么被抑制”。
+
+## 持续推进科研模式
+
+开启方式：
+
+```bash
+.venv/bin/codex-taskboard current-thread
+.venv/bin/codex-taskboard continuous-mode on --session-id <codex_session_id>
+```
+
+关闭方式：
+
+```bash
+.venv/bin/codex-taskboard continuous-mode off --session-id <codex_session_id>
+```
+
+迁移到新 agent session 时，可以先把默认 continuous 目标切到新的 session：
+
+```bash
+.venv/bin/codex-taskboard continuous-mode bind --session-id <new_codex_session_id>
+```
+
+迁移完成后，如需彻底清理旧 session 的 continuous 状态：
+
+```bash
+.venv/bin/codex-taskboard continuous-mode clear-session --session-id <old_codex_session_id>
+```
+
+### continuous 收口转下一阶段
+
+当 continuous mode 已开启，而 agent 输出 `TASKBOARD_SIGNAL=NO_FURTHER_TASKS`、`STOP_AUTOMATION` 或 `END_EXPERIMENT` 时，taskboard 不会直接停住，而会持续发送一条更强的转场 prompt，直到 agent 明确返回：
+
+```text
+TASKBOARD_SIGNAL=NEW_TASKS_STARTED
+```
+
+同时，这一轮协议尾部里的 `LIVE_TASK_STATUS` 必须是 `submitted` 或 `awaiting`。这意味着：
+
+- 当前 proposal 的 closeout 已经完成，并且写成一份论文级 markdown 收口报告。
+- 当前 proposal 的关键结论已经写回 `project_history_file`。
+- 下一阶段的新 proposal 已经生成，而且是分阶段、分决策分支、带实现细节的实验规划书。
+- 至少一条下一阶段 live task 已经真正提交到 taskboard。
+
+也可以在 `dashboard` 中按 `c` 快捷键切换。状态会持久化保存到：
+
+```text
+$CODEX_TASKBOARD_HOME/continuous_research_mode.json
+```
+
+`continuous-mode on/off/bind/clear-session` 现在都会做一次写后读一致性校验；如果 CLI 打印 persistence mismatch 并返回非零状态，说明磁盘状态并没有可靠切到目标值，不应假设开关已经生效。
+
+`continuous-mode status --json` 当前至少应关注这些字段：
+
+- `effective_wait_state` / `effective_last_signal`
+  - 表示当前 session 实际处在哪个自动化等待态，例如 `WAITING_ON_ASYNC`、`WAITING_ON_FEEDBACK`、`PARKED_IDLE`。
+- `running_task_count` / `running_task_ids`
+  - 当前 session 口径下真实仍在运行或排队中的 live task 集合。
+- `proposal_bound_running_task_count` / `proposal_bound_running_task_ids`
+  - 当前 proposal 路径下真实仍在运行或排队中的 live task 集合，适合判断是否还应继续分发新任务。
+- `awaiting_feedback_task_count`
+  - 已完成/失败但尚未被当前 session 吸收的 queued feedback 数；这类任务会让 automation recommendation 变成 `absorb_completed_receipt`，而不是 `wait_for_live_task`。
+- 兼容字段：`live_task_count` / `proposal_bound_live_task_count` / `pending_feedback_live_task_count`
+  - 仍会返回旧名字，便于兼容旧脚本；但新自动化应改读 `running_*` / `awaiting_feedback_*`。
+- `parked_watchdog_due` / `parked_wait_age_seconds` / `parked_watchdog_interval_seconds`
+  - 当 session 处于 `PARKED_IDLE` 时，用来判断 parked 已持续多久，以及是否已经到了应该再次提醒 agent 的 watchdog 窗口。
+- `proposal_bootstrap_ready` / `proposal_bootstrap_reason`
+  - 说明最近时间日志里的 `Next bounded action` 是否已经进入 successor bootstrap 语义，例如“新 family 设计 / proposal 骨架 / route replanning / 最小 pilot gate”。
+- `proposal_dispatch_ready`
+  - 说明当前 session 的最新机器可读信号已经进入 `MATERIALS_READY_FOR_PROPOSAL`，下一步应优先完成 proposal 固化和任务分发。
+- `platform_recovery_task_count`
+  - 当前处于平台级自动恢复等待态的任务数量，例如 `429` / `5xx` / transport transient。
+- `human_guidance_active`
+  - 当前 session 是否仍处于人工暂停态。
+- `automation_recommendation`
+  - taskboard 对当前 session 的直接建议，例如 `wait_for_live_task`、`absorb_completed_receipt`、`materialize_successor_proposal`、`finish_proposal_dispatch`、`wait_for_external_evidence`、`dispatch_parked_watchdog`。
+
+说人话：
+
+- `continuous-mode enabled=true` 还不够。
+- 真正判断“自动科研能否继续推进”时，应至少同时看：
+  - `effective_wait_state`
+  - `automation_recommendation`
+  - `running_task_count`
+  - `awaiting_feedback_task_count`
+  - `human_guidance_active`
+
+## 人工干预暂停
+
+当你准备在 VSCode 的 Codex 插件里直接指导当前 agent，而不希望 taskboard 的后台回流打断它时，使用 `human-guidance`：
+
+```bash
+.venv/bin/codex-taskboard current-thread
+.venv/bin/codex-taskboard human-guidance on --session-id <codex_session_id> --lease-seconds 900 --reason "manual steer"
+```
+
+恢复自动回流：
+
+```bash
+.venv/bin/codex-taskboard human-guidance off --session-id <codex_session_id>
+```
+
+切换到新 session：
+
+```bash
+.venv/bin/codex-taskboard human-guidance bind --session-id <new_codex_session_id>
+.venv/bin/codex-taskboard human-guidance clear-session --session-id <old_codex_session_id>
+```
+
+补充说明：
+
+- `dashboard` 中按 `h` 可快速切换当前默认 session 的人工暂停状态。
+- pause 期间，已有 followup / queued feedback 不会消失，只会延后处理。
+- 状态持久化保存在 `$CODEX_TASKBOARD_HOME/human_guidance_mode.json`。
+
+## 管理员手动 session 迁移
+
+当旧 session 在 VSCode/Codex 插件中已经出现不可恢复的渲染或滚动异常，但你又希望 taskboard 后续完全切到一个新的 Codex session 时，使用：
+
+```bash
+.venv/bin/codex-taskboard migrate-session \
+  --from-session-id <old_codex_session_id> \
+  --to-session-id <new_codex_session_id>
+```
+
+行为要点：
+
+- 这是一次真实 cutover，不是只改默认 session。
+- 所有非隐藏 task 记录都会改绑到新 session。
+- followup、queued feedback、continuous mode、human-guidance 的 session 绑定也会一起迁走。
+- taskboard 会中断自己正在发往旧 session 的回流子进程，并把这部分状态缓冲到 `session_migrations.json`，随后由新 session 接手。
+- 如需先看影响面，可加 `--dry-run`。
+
+## Proposal 绑定
+
+提交任务时可以显式传入：
+
+```bash
+.venv/bin/codex-taskboard submit-job \
+  --task-id example-train \
+  --workdir /path/to/project \
+  --command 'python train.py' \
+  --proposal /path/to/PLAN.md \
+  --closeout-proposal-dir /home/Awei/LLM/passage/projects/P01_curiosity_grpo/closeout_proposal \
+  --feedback-mode auto
+```
+
+如果 taskboard 报 `Duplicate submit guard`，说明当前 session/proposal 下已经有等价 live task；先用 `codex-taskboard status --json` 核对 authoritative 任务，再决定是否真的需要从 taskboard 端显式补 `--allow-duplicate-submit`。
+
+行为要点：
+
+- 同一 `session + workdir` 的后续任务会自动继承 proposal，除非显式清空。
+- `closeout_proposal_dir` 会和 proposal 一起在同一实验链里继承；新 close-out 文档和新 proposal 都应优先写到这个目录。
+- prompt 会显式提醒 agent：文档使用中文书写，术语面向论文写作和正式技术说明，而不是内部 shorthand。
+- prompt 现在会先要求 agent 判断下一动作属于 `inline microstep` 还是 `async task`，而不是默认每轮都强制新建 task。
+- 主链路任务通常作为 `proposal_binding=owner`。
+- watcher、评测、日志整理等辅助任务通常作为 `proposal_binding=sidecar`。
+- taskboard 的结果 prompt 会提醒 agent 把结果、分析、下一步计划继续写回 proposal。
+
+## 完整工作流
+
+每次 agent 被 taskboard 唤起时，都按同一套顺序工作，而不是凭上下文惯性乱跳：
+
+1. 先重读已绑定 `project_history_file / proposal_file` 顶部 canonical head，再看本轮回流。
+   若 canonical head 异常，taskboard 会在 prompt 里告诉你这两个头部当前是 `missing_block`、`missing_keys` 或 `read_error`，并给出 head hash；若头部正常，则不会反复刷出 `ok` 状态。
+2. 判断当前是否仍在同一 `same_work_package`；如果是，先考虑在当前 proposal/history 中合并推进，而不是拆新文档。
+3. 把下一动作分成下面四类之一。
+4. 如果是本地短步骤，直接 inline 完成；若只是继续当前认知线程且不需要 taskboard 再次外部唤起，输出 `TASKBOARD_SIGNAL=LOCAL_CONTINUE_NO_WAKE`；若需要 taskboard 在短延迟后再次外部重入当前会话，再输出 `TASKBOARD_SIGNAL=LOCAL_MICROSTEP_BATCH`。
+5. 如果是已经提交的长任务等待回流，输出 `TASKBOARD_SIGNAL=WAITING_ON_ASYNC`。
+6. 如果是可能跨回复继续运行的本地 CPU-only 进程，不要裸跑；优先用 `codex-taskboard bind-before-launch`，若进程已启动则 `attach-pid`。
+7. 如果人工正在直接 steer 当前 session，先打开 `human-guidance` pause；暂停期间 taskboard 只排队，不打断。
+8. 回复末尾做一次结构化自检，确认自己对 taskboard 的操作是否正确。
+
+canonical head 不是自由摘要，而是放在文档最前面的一个很小的机器锚点。它不替代人话导言，只负责让 taskboard 和 agent 在长上下文里始终找到同一主线。推荐格式：
+
+```text
+<!-- TASKBOARD_CANONICAL_HEAD_BEGIN CH1 role=proposal -->
+BIG_MAINLINE=contrastive_retention_guardrail_reweight_followthrough
+SMALL_MAINLINE=qwen3-8b realization-gap repair
+CURRENT_BOUNDARY=当前只允许 repaired-owner 层级的 reviewer-facing claim
+NEXT_STEP=先完成 CPU-only 审计，再决定是否进入下一条 GPU 路由
+KEY_EVIDENCE=/abs/path/to/summary.json ; /abs/path/to/report.md
+MILESTONE=realization-gap confirmed on qwen3-8b, canonical mainline unchanged
+<!-- TASKBOARD_CANONICAL_HEAD_END -->
+```
+
+最少必填键是：
+
+- `BIG_MAINLINE`
+- `SMALL_MAINLINE`
+- `CURRENT_BOUNDARY`
+- `NEXT_STEP`
+
+可选补充：
+
+- `KEY_EVIDENCE`
+- `MILESTONE`
+
+## 工作流原则
+
+taskboard 现在采用四类动作判定，而不是“默认所有下一步都物化为 live task”：
+
+- `inline_now`
+  - 指预计 60 秒内完成、无需 GPU、只依赖当前已落盘本地工件、无需异步等待或未来 callback 的 CPU-only 审查、脚本执行、文档写回或小修复。
+  - 这类动作默认就在当前回复里直接完成，不需要为了“形成 task”而额外提交 taskboard。
+- `inline_batch`
+  - 指逻辑上仍属于同一段本地短流程，但 1 个回复里还想继续做 2-4 个连续 microsteps。
+  - 如果当前回复结束后仍在同一认知线程内继续推进、且不需要 scheduler 额外创建 reminder，可输出 `TASKBOARD_SIGNAL=LOCAL_CONTINUE_NO_WAKE`；只有当你明确需要 taskboard 在短延迟后再次从外部重入当前会话时，才输出 `TASKBOARD_SIGNAL=LOCAL_MICROSTEP_BATCH`。
+  - 这适合 CPU-only 的审计、读取日志、比对结果、写 proposal/history、跑小脚本和 smoke 级验证。
+- `same_work_package`
+  - 指同一对象、同一证据包、同一 CPU-only 审计/claim-boundary/closeout 链。
+  - 这不是新的 task 类型，而是一个“不要过度物化文档”的约束。
+  - 如果当前仍是同一 `same_work_package`，默认继续在当前 proposal/history 中推进；不要只为了拆 allowed/forbidden/effectiveness/guardrail 子标题，就继续新建 successor proposal。
+- `bind_before_launch`
+  - 指本地 CPU-only，但一旦启动就可能跨多个回复继续运行，或者一旦 agent/网络/上下文异常中断就会丢生命周期的进程。
+  - 默认命令是 `codex-taskboard bind-before-launch ...`；如果进程已经在跑，再用 `attach-pid`。
+  - 这类动作不要裸跑后再想起绑定；应先以 CPU-only 任务提交到 taskboard，或先 `attach-pid` 再等待。
+- `async_task`
+  - 指 GPU 训练、多卡评测、远程执行、长时作业、依赖外部等待、或必须留下 future callback 生命周期的动作。
+  - 只有这类动作才应该被物化成 taskboard 的真实 live task。
+  - 如果等价 async task 已经提交或确认存在，而当前轮只是等待其结果自动回流，应输出 `TASKBOARD_SIGNAL=WAITING_ON_ASYNC`，而不是再被 followup 误导去多建一条任务。
+
+一句话判定：
+
+- 如果下一动作可以在当前对话里立刻做完并立刻吸收结果，它不是 taskboard task。
+- 如果下一动作必须依赖“未来某个时刻再回来”的生命周期，它才是 taskboard task。
+- 如果下一动作会启动一个可能跨回复继续运行的本地 CPU-only 进程，它也不应裸跑；先绑定再运行。
+- 如果当前只是把同一条 CPU-only 审计链继续往下写，它通常也不是新的 proposal task；先在当前 proposal/history 中合并推进。
+- CPU-only / smoke / 审计 / 文档整理类任务默认本地执行或显式使用 `--gpu-slots 0`；把 GPU 队列优先留给正式训练、多卡评测和其他高耗时作业。
+
+完整规范见：
+
+- [Agent 工作流规范（中文）](./docs/AGENT_WORKFLOW_SPEC_ZH.md)
+
+## Prompt Profile 约定
+
+taskboard 当前把后台 prompt 分成两档：
+
+- `compact`：用于 `resume`、标准 `followup`、continuous followup 和 queued feedback 合并回传。目标是保留 proposal 绑定、文档写回、安全说明、inline/async 路由、执行闭环和 queue hygiene 这类必要治理语义，但避免每次重试、每次追问、每个 batch item 都重复整段项目发展史、训练执行规范和 proposal binding guard。
+- `full`：保留给需要完整治理包的场景，例如独立的权威型规则块、需要完整重述长期项目治理要求的 prompt，或未来新增的“脱离当前 live 对话上下文也必须自解释”的入口。
+
+当前映射规则：
+
+- `build_resume_prompt` 发 `compact`，因为单条后台回传首先是补充上下文；如果它反复携带整段治理说明，会抬高截断概率，并把真正需要执行的尾部动作挤掉。
+- `build_standard_followup_prompt` 发 `compact`，因为它只是提醒“该继续闭环了”，不应该长得像一份新的 manual packet。
+- `build_continuous_research_prompt` 发 `compact`，因为 continuous mode 可能多次触发；若每轮都重发 full prompt，最容易把会话推向重复总结、空转或“continuous 死机”。
+- `build_queued_feedback_batch_prompt` 发“共享 compact header + 每条任务块”，因为 batch 的治理规则应只说一次，而不是每个完成任务各自重复一遍长 prompt。
+
+当前 compact prompt 的核心变化：
+
+- canonical head 只在异常时提示，正常 `ok` 状态不再反复出现在后台唤起里。
+- `proposal_file / closeout_proposal_dir / project_history_file / project_history_log_dir` 只打印一次，避免路径块在单轮里重复堆叠。
+- 不再显式下发一整张长版 `Taskboard protocol card`；改为固定的“轻度科研约定”六条、continuous 收口补充句和协议尾注。
+- `Taskboard 操作方法` 固定为最小动作路由：本地 CPU-only 留在当前对话；正式实验用 `submit`；跨回复本地长任务用 `bind-before-launch` / `attach-pid`；正式实验默认建议 tmux。
+- 不再要求每个 callback 都先刷新主 `history/proposal` 再强制分发下一条 live task。
+- 允许连续短 CPU-only 微步骤先在当前回合吸收，之后再批量刷新文档和做 queue hygiene。
+- 新增 `same_work_package` 反循环约束：如果仍在同一 CPU-only 审计/claim-boundary 链里，就继续在当前 proposal/history 中完成，不要被 continuous followup 推成一串 successor proposal。
+- 新增 `parked_idle + watchdog` 路径：无新 evidence、无 live task、canonical head 未变化时，continuous session 会先挂短延迟 recheck；若之后仍持续 parked，taskboard 再发 watchdog reminder，让 agent 先做 bounded self-review，再决定是否继续 parked。
+- 新增 `human-guidance` pause lane：人工直接 steer 时，后台回流只排队不打断。
+- 新增 `bind-before-launch` 命令：把“先绑定再启动”的规则变成一个记忆成本更低的默认入口。
+- 查文献不再是每轮 continuous wakeup 的默认动作；只有新方法 family、论文级外部对照或长期方向变化时才触发。
+- 对正式 GPU 训练、多卡评测、远程执行和其他长任务，仍然维持强闭环治理和 proposal 绑定。
+
+维护原则：
+
+- 新增后台提醒时，默认先选 `compact`。
+- 只有当 compact 不能完整表达必须保留的治理边界，而且这个 prompt 本身需要脱离当前上下文独立成立时，才升级到 `full`。
+
+## 文档导航
+
+- [日常用户手册](./docs/USER_MANUAL.md)
+- [管理员手册（中文）](./docs/ADMIN_MANUAL_ZH.md)
+- [Agent 工作流规范（中文）](./docs/AGENT_WORKFLOW_SPEC_ZH.md)
+- [Agent 分发 README（中文）](./docs/AGENT_DISPATCH_README_ZH.md)
+- [Docker 用户手册（中文）](./docs/DOCKER_USER_MANUAL_ZH.md)
+- [Docker 自动科研手册（中文）](./docs/DOCKER_AGENT_AUTOMATION_MANUAL_ZH.md)
+- [Docker 结果回收手册（中文）](./docs/DOCKER_RESULT_ONLY_MANUAL_ZH.md)
+- [重部署与 smoke test 指南（中文）](./docs/REDEPLOY_GUIDE_ZH.md)
+
+## 目录说明
+
+- [`src/codex_taskboard/cli.py`](./src/codex_taskboard/cli.py): 主 CLI、调度器、API、dashboard、resume/followup 逻辑。
+- [`extras/systemd/codex-taskboard-dispatcher.service`](./extras/systemd/codex-taskboard-dispatcher.service): 调度常驻服务示例。
+- [`extras/systemd/codex-taskboard-api.service`](./extras/systemd/codex-taskboard-api.service): API 常驻服务示例。
+- [`extras/codex_taskboard_client.py`](./extras/codex_taskboard_client.py): 简易 HTTP 客户端。
+- [`extras/smoke/taskboard_torchrun_4gpu_smoke.py`](./extras/smoke/taskboard_torchrun_4gpu_smoke.py): 4 卡 smoke 任务脚本。
+
+## 运行态与结果接口补充
+
+除 `continuous-mode status --json` 外，`status --json` / `status-result` 这两类接口现在还会暴露更细的运行态字段，常用的有：
+
+- `lifecycle_state`
+  - 任务总生命周期状态，例如 `queued`、`running`、`completed`。
+- `runtime_state`
+  - 运行时细分状态，例如 `child_live`、`waiting_feedback`、`platform_retry_waiting`。
+- `dispatch_diagnostics`
+  - 调度层诊断快照，包含 `blocked_reason`、`gpu_block_reason`、`eligible_gpu_ids` 等。
+- `platform_recovery`
+  - 平台恢复状态；用于区分 `429 / provider 5xx / transport transient` 与真正的任务逻辑失败。
+- `automation_recommendation`
+  - taskboard 针对该任务当前最合理的下一动作，例如继续等待、吸收 receipt、等待平台恢复。
+
+建议解释顺序：
+
+1. 先看 `status` / `lifecycle_state`
+2. 再看 `runtime_state`
+3. 若任务异常或卡住，再看 `dispatch_diagnostics` 与 `platform_recovery`
+
+尤其注意：
+
+- `platform_recovery.state != none` 时，不应把这类失败直接吸收到 scientific negative result。
+- 对自动科研流程而言，这类任务更接近 `WAITING_ON_PLATFORM_RETRY`，而不是“方法已失败”。
+
+## 信号语义
+
+- `TASKBOARD_SIGNAL=LOCAL_CONTINUE_NO_WAKE`
+  - 当前轮结束时，agent 仍在同一认知线程内推进；不应额外创建 local reminder，不应累计 `repeated_local_action_without_new_evidence`，也不应把这类 inline continue 误推成 `parked/idle`。
+- `TASKBOARD_SIGNAL=LOCAL_MICROSTEP_BATCH`
+  - 当前轮结束时，agent 明确请求 taskboard 在短延迟后再次外部重入当前会话。
+  - 它是“请稍后再从外部叫醒我一次”，不是“我已经停机”。
+- `TASKBOARD_SIGNAL=WAITING_ON_ASYNC`
+  - 当前轮已经提交或确认了等价 async / live task，此时只是等待 taskboard 生命周期自动回流。
+  - taskboard 会避免继续用通用 followup 催促“再分发新任务”；如果确实还没看到更新的 async task，会改成较慢 watchdog 观察，而不是高频打断。
+- `WAITING_ON_FEEDBACK`
+  - 这是 continuous/status/observability 层的新等待态，表示运行已经结束，但 receipt 尚待当前 session 吸收。
+  - 它不是 agent 需要输出的 `FINAL_SIGNAL`，也不应再被误读成 live compute 仍在运行。
+- `TASKBOARD_SIGNAL=PARKED_IDLE`
+  - 当前 proposal 已 parked、没有新 evidence、没有 running live task，且 canonical head 未变化。
+  - taskboard 会把当前 session 标记为 parked idle，并先进入静默等待；若 parked watchdog 到期，会再次提醒 agent 做一次 bounded local self-review。
+- `TASKBOARD_SIGNAL=MATERIALS_READY_FOR_PROPOSAL`
+  - 当前轮已经完成 successor hypothesis / proposal 的 CPU-only 材料整理。
+  - taskboard 会切到一个专门的 materialization / dispatch followup，要求 agent 先把 proposal/history 写实，再至少提交一条 live task。
+  - 这不是重新 parked，也不是已经完成转场；真正完成后应返回 `NEW_TASKS_STARTED`。
+- `TASKBOARD_SIGNAL=NO_FURTHER_TASKS` / `TASKBOARD_SIGNAL=STOP_AUTOMATION` / `TASKBOARD_SIGNAL=END_EXPERIMENT`
+  - continuous 模式关闭时：表示停止自动推进。
+  - continuous 模式开启时：这三个信号都会先进入“收口 -> 新 proposal -> 新任务”转场 override，而不是直接停机；只有完成转场并返回 `NEW_TASKS_STARTED` 后，这条 continuous followup 才会结束。
+
+## 协议尾注
+
+后台 prompt 现在会要求 agent 在回复末尾补一组固定自检行：
+
+- `TASKBOARD_PROTOCOL_ACK=TBP1`
+- `CURRENT_STEP_CLASS=inline_now|inline_batch|async_task|milestone_closeout|stop`
+- `TASKBOARD_SELF_CHECK=pass|fail`
+- `LIVE_TASK_STATUS=none|submitted|awaiting`
+- `FINAL_SIGNAL=LOCAL_CONTINUE_NO_WAKE|LOCAL_MICROSTEP_BATCH|ANALYZING_NEW_EVIDENCE|MATERIALS_READY_FOR_PROPOSAL|WAITING_ON_ASYNC|PARKED_IDLE|NO_FURTHER_TASKS|STOP_AUTOMATION|END_EXPERIMENT|NEW_TASKS_STARTED|none`
+
+这组尾注的作用不是替代 `TASKBOARD_SIGNAL=...`，而是让 taskboard 在 agent 异常中断、信号遗漏或长上下文漂移时，仍能恢复“你刚才到底认为自己在做什么”。
+
+如果这一组尾注缺失或明显错误，taskboard 不会再默默放过，而会发一个短的协议修复 followup，只要求 agent：
+
+1. 用 1-2 句人话确认当前唯一最高优先级动作。
+2. 重新补齐正确的协议尾部。
+
+## 说明
+
+仓库中的旧事故报告、阶段性同步文档和历史手册已经清理；当前说明以本 README 和 `docs/` 下文档为准。

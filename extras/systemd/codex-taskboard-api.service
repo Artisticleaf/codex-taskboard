@@ -1,0 +1,22 @@
+[Unit]
+Description=codex-taskboard authenticated API server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubunut
+Group=ubunut
+WorkingDirectory=/home/Awei/codex-taskboard
+Environment=CODEX_TASKBOARD_HOME=/home/ubunut/.local/state/codex-taskboard
+Environment=CODEX_HOME=/home/ubunut/.codex
+Environment=CODEX_BIN=/usr/local/bin/codex
+Environment=TMUX_BIN=/usr/bin/tmux
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/Awei/codex-taskboard/.venv/bin/codex-taskboard service run api --bind 0.0.0.0 --port 8765
+Restart=always
+RestartSec=3
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=multi-user.target
