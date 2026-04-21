@@ -1,0 +1,11 @@
+.venv/
+.venv_copied_backup/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+.DS_Store

@@ -174,6 +174,20 @@ from codex_taskboard.task_storage import (
     write_task_spec as write_task_spec_impl,
     write_task_state as write_task_state_impl,
 )
+from codex_taskboard.process_runtime import (
+    ProcessRuntimeHooks,
+    build_tmux_session_name as build_tmux_session_name_impl,
+    pid_exists as pid_exists_impl,
+    read_pid_cmdline as read_pid_cmdline_impl,
+    read_pid_cwd as read_pid_cwd_impl,
+    read_pid_snapshot as read_pid_snapshot_impl,
+    read_pid_state as read_pid_state_impl,
+)
+from codex_taskboard.task_payloads import (
+    TaskPayloadHooks,
+    normalize_task_spec_payload as normalize_task_spec_payload_impl,
+    normalize_task_state_payload as normalize_task_state_payload_impl,
+)
 from codex_taskboard.task_results import TaskResultHooks, build_task_result_payload as build_task_result_payload_impl
 from codex_taskboard.service_manager import (
     ServiceManagerHooks,
@@ -5435,6 +5449,66 @@ def build_deferred_resume_result(
         "recovered_with_continue": False,
         "taskboard_signal": "",
     }
+
+
+def process_runtime_hooks() -> ProcessRuntimeHooks:
+    return ProcessRuntimeHooks(
+        path_exists=lambda path: path.exists(),
+        read_bytes=lambda path: path.read_bytes(),
+        read_text=lambda path: path.read_text(encoding="utf-8", errors="ignore"),
+        readlink=os.readlink,
+        run_subprocess=lambda args, timeout: run_subprocess(args, timeout=timeout),
+    )
+
+
+def pid_exists(pid: int) -> bool:
+    return pid_exists_impl(pid, hooks=process_runtime_hooks())
+
+
+def read_pid_cmdline(pid: int) -> str:
+    return read_pid_cmdline_impl(pid, hooks=process_runtime_hooks())
+
+
+def read_pid_cwd(pid: int) -> str:
+    return read_pid_cwd_impl(pid, hooks=process_runtime_hooks())
+
+
+def read_pid_state(pid: int) -> str:
+    return read_pid_state_impl(pid, hooks=process_runtime_hooks())
+
+
+def read_pid_snapshot(pid: int) -> dict[str, Any] | None:
+    return read_pid_snapshot_impl(pid, hooks=process_runtime_hooks())
+
+
+def build_tmux_session_name(task_id: str) -> str:
+    return build_tmux_session_name_impl(task_id)
+
+
+def task_payload_hooks() -> TaskPayloadHooks:
+    return TaskPayloadHooks(
+        normalize_task_id=normalize_task_id,
+        normalize_timestamp_fields=normalize_timestamp_fields,
+    )
+
+
+def normalize_task_spec_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    return normalize_task_spec_payload_impl(
+        raw,
+        version=VERSION,
+        default_cpu_retry_max_attempts=DEFAULT_CPU_RETRY_MAX_ATTEMPTS,
+        default_startup_failure_seconds=DEFAULT_STARTUP_FAILURE_SECONDS,
+        hooks=task_payload_hooks(),
+    )
+
+
+def normalize_task_state_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    return normalize_task_state_payload_impl(
+        raw,
+        version=VERSION,
+        default_cpu_retry_max_attempts=DEFAULT_CPU_RETRY_MAX_ATTEMPTS,
+        hooks=task_payload_hooks(),
+    )
 
 
 def task_storage_hooks() -> TaskStorageHooks:

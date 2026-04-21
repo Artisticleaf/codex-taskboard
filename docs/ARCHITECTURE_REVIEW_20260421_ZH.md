@@ -13,6 +13,7 @@
 |  - api_views.py: /tasks /queue /status-result /wait-result        |
 |  - task_dashboard.py: dashboard list/filter/sort/presentation     |
 |  - task_results.py: terminal result/read model                    |
+|  - task_payloads.py: task spec/state defaulting and normalization |
 +-------------------------------------------------------------------+
 |  Access Control / Submit Policy Layer                             |
 |  - api_access.py: tenant visibility / queue visibility            |
@@ -21,13 +22,18 @@
 |  - executors.py: executor registry / remote path / GPU remap      |
 +-------------------------------------------------------------------+
 |  Scheduler / Workflow Layer                                       |
-|  - cli.py: dispatch core / readiness / launch / followup /        |
-|            continuous research / dashboard assembly               |
+|  - scheduler_resources.py: CPU/GPU placement and runtime shaping  |
+|  - automation_state.py: continuous/human-guidance state machine   |
+|  - task_storage.py: spec/state/event IO facade                    |
+|  - cli.py: dispatch core / launch / followup wiring / commands    |
 |  - dispatcher_service.py: long-running dispatch loop shell        |
 +-------------------------------------------------------------------+
 |  Service Orchestration Layer                                      |
 |  - service_manager.py: instance lock / stale pid cleanup /        |
 |                        runtime record / drift doctor / unit render |
++-------------------------------------------------------------------+
+|  Runtime / Process Introspection Layer                            |
+|  - process_runtime.py: /proc inspection / pid snapshot / tmux name|
 +-------------------------------------------------------------------+
 |  Storage / Index Layer                                            |
 |  - task-index.json + task_index.py                                |
@@ -67,12 +73,27 @@
 - [x] `executors.py`
   - 抽离 executor registry、remote workdir 校验、host<->remote GPU 映射。
   - 目标：把 Docker/SSH 执行器契约从 `cli.py` 中剥离，降低 API submit 与远端执行细节的耦合。
+- [x] `task_storage.py`
+  - 抽离 task path/spec/state/event IO、任务枚举与 index 写回入口。
+  - 目标：把磁盘布局和读写语义集中到 storage facade，减少 CLI 到处直接拼路径。
+- [x] `automation_state.py`
+  - 抽离 continuous-research / human-guidance 的持久化状态机。
+  - 目标：把 session 级自动化状态与 followup 调度主流程解耦，降低状态漂移风险。
+- [x] `scheduler_resources.py`
+  - 抽离 CPU/GPU 预算计算、命令模板渲染、GPU headroom 选择逻辑。
+  - 目标：把资源放置策略从 CLI 控制流里拆开，便于单测和后续继续分出 scheduler。
+- [x] `task_payloads.py`
+  - 抽离 task spec/state 默认字段补齐与时间戳归一化。
+  - 目标：把持久化 payload 契约从 `cli.py` 中拿出来，便于 storage/api/dispatcher 共用。
+- [x] `process_runtime.py`
+  - 抽离 `/proc` 读取、pid 快照与 tmux session 命名。
+  - 目标：把 service doctor / cleanup / runtime 观测相关逻辑从 CLI 命令集里拆开，降低耦合。
 
 ### P2 下一阶段建议
 
-- [ ] 抽离 dispatch / readiness / resource placement 核心到 `scheduler.py` / `scheduler_readiness.py`
-- [ ] 抽离 followup / continuous research / human guidance 到 `automation_state.py`
-- [ ] 抽离 task spec/state IO 到 `task_storage.py`
+- [ ] 继续抽离 dispatch / readiness 主循环到 `scheduler.py` / `scheduler_readiness.py`
+- [ ] 把 followup queue/coalescing 继续从 `cli.py` 中拆成 `followup_runtime.py`
+- [ ] 把 `/status` / `/dashboard` 的剩余 read model 继续压出 `cli.py`
 - [ ] 逐步让 `cli.py` 只保留 parser + wiring + thin wrappers
 
 ## 本轮验收口径
