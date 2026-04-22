@@ -69,7 +69,7 @@ class PromptAssetTests(unittest.TestCase):
 
         self.assertTrue(prompt.strip().endswith("LIVE_TASK_STATUS=none|submitted|awaiting"))
         footer_index = prompt.rfind("TASKBOARD_SIGNAL=EXECUTION_READY|WAITING_ON_ASYNC|CLOSEOUT_READY|none")
-        artifact_index = prompt.rfind("artifact_paths:")
+        artifact_index = prompt.rfind("结果文件路径：")
         self.assertGreater(footer_index, artifact_index)
 
 

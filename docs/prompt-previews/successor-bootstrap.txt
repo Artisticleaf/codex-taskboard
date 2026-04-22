@@ -15,6 +15,11 @@ project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
 当前 proposal 以上面的 proposal_file 为准。
 本轮可靠结果、关键诊断结论和下一步明确动作默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。
 
+这是 closeout 完成后由 taskboard 强制开启的新 planning session。
+旧 session 的职责只剩存档与追溯；新的规划、后续回流和下一轮实验都从这个新 session 继续。
+不要再回头证明上一轮是不是已经结束；请直接接住 handoff、history、proposal 和关键结果，判断下一轮最值得推进的问题，并说明理由。
+上一轮已收口的 session: `session-closeout-001`。
+
 你现在处于 planning。
 你是这条研究主线这一轮的负责人。默认目标不是解释为什么还不能开始，而是把下一轮最值得验证的问题、假设和实验方案尽快做实，并写清你为什么这样选。
 这轮要完成：
@@ -25,15 +30,15 @@ project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
 - `proposal_file`
 - `project_history_file`
 - 最近的 handoff / closeout / summary / report / log / 结果文件
-没有人工干预时，你需要把上一阶段留下的证据、history、handoff 与必要文献放在一起比较，再主动形成当前最优 proposal，并说明为什么这样选。
-当前要把精力放在刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。
+这是新的 Codex session。请直接接住上一轮留下的 history、handoff、proposal 和关键结果，刷新当前最优 proposal，并说明为什么这样选。
+上一轮信号: TASKBOARD_SIGNAL=none。
 planning 完成标准不是写完一份空文档，而是形成一份可执行、可审计、可分发的 proposal。
 
 本轮决策顺序：
 1. 先把上一阶段留下的结果、失败边界、未解问题和必须继承的文件整理成当前 planning 的输入；如果主线真的进入新的方法方向，就补读最关键的旧文献与近年的代表性新工作。
 2. 写或刷新当前 proposal：明确 benchmark/数据集、比较对象、核心假设、实验设计、实现要点、验证指标、停止条件和风险边界。
 3. 如果还缺本地 CPU 审计、脚本或配置落盘、smoke 前置或首个实验包，就在当前对话里补齐，不要把这些准备动作外包成新的阶段。
-4. 当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL=EXECUTION_READY`，把链路推进到 execution。
+4. planning 不要用 `TASKBOARD_SIGNAL=none` 停住；当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL=EXECUTION_READY`。如果你已经在这一轮里提交了 live task 并开始等待回流，就输出 `TASKBOARD_SIGNAL=WAITING_ON_ASYNC`。
 
 taskboard 使用说明：
 - planning 不要停在“材料差一点”。当前上下文里还能补齐的审计、配置和 smoke 前置，就直接补齐。

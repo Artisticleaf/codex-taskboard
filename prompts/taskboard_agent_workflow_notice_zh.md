@@ -7,7 +7,7 @@ runtime 默认从 `prompts/taskboard_runtime_prompt_zh.toml` 读取自动唤起 
 - 外部自动化模式只分两类：`managed` 与 `continuous`。
 - 科研阶段只分三类：`planning`、`execution`、`closeout`。
 - agent 对 taskboard 的公开信号只保留：`EXECUTION_READY`、`WAITING_ON_ASYNC`、`CLOSEOUT_READY`、`none`。
-- `managed` 只托管任务和回流 backlog，不自动再唤起；`continuous` 才会在同一 session 内循环 `planning -> execution -> closeout -> planning`。
+- `managed` 只托管任务和回流 backlog，不自动再唤起；`continuous` 会循环 `planning -> execution -> closeout`，并在 closeout 完成后强制开启一个新的 Codex session 进入下一轮 planning。
 - `protocol-repair` 保留为唯一纠错支线：agent 没有按尾部协议回复时，taskboard 发送极短修复 prompt，而不是重新注入长治理文本。
 
 ## 轻度科研约定
@@ -24,7 +24,7 @@ runtime 默认从 `prompts/taskboard_runtime_prompt_zh.toml` 读取自动唤起 
 - 真正需要 GPU、remote、长时间等待或独立生命周期时，才用 `codex-taskboard submit`；本地跨回复长任务再用 `bind-before-launch` / `attach-pid` 接管，正式实验默认优先用 tmux 托管。
 - `TASKBOARD_SIGNAL=WAITING_ON_ASYNC` 表示已有 live task 等回流；taskboard 默认按 1 小时节奏提醒对应 agent 回来确认一次，只为确认实验没卡住且仍有日志/结果产出。
 - backlog/回流积压可用 dashboard 或 `codex-taskboard backlog` 查看与清理；`dashboard` 也会显示当前 session 的 `automation-mode` 与 backlog 计数。
-- closeout / planning 转场前先做 handoff 确认：核对 predecessor proposal、closeout 文档、handoff 文档、`project_history_file` 与 `proposal_path` 绑定，避免错绑。
+- closeout / planning 转场前先做 handoff 确认：核对上一轮 proposal、closeout 文档、handoff 文档、`project_history_file` 与 `proposal_path` 绑定，避免错绑；closeout 完成后的回流默认转发到新的 planning session，不主动打断正在工作的 successor session。
 
 ## 协议尾部
 

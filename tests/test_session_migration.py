@@ -11,8 +11,10 @@ from unittest.mock import patch
 
 from codex_taskboard.cli import (
     AppConfig,
+    bootstrap_successor_session_after_closeout,
     command_migrate_session,
     followup_path,
+    followup_key_for,
     load_continuous_research_mode,
     load_active_feedback_runtime,
     load_human_guidance_mode,
@@ -23,6 +25,7 @@ from codex_taskboard.cli import (
     register_active_feedback_runtime,
     resume_codex_session_with_prompt,
     session_migration_entry,
+    session_lock_name,
     set_continuous_research_mode,
     set_human_guidance_mode,
     task_last_message_path,
@@ -66,6 +69,13 @@ def cli_args(config: AppConfig, **overrides: object) -> argparse.Namespace:
 
 
 class SessionMigrationTests(unittest.TestCase):
+    def test_session_lock_name_truncates_overlong_identifiers(self) -> None:
+        long_session_id = "session-" + ("very-long-segment-" * 30)
+        lock_name = session_lock_name(long_session_id)
+
+        self.assertLessEqual(len(lock_name), 120)
+        self.assertNotEqual(lock_name, long_session_id)
+
     def test_load_active_feedback_runtime_drops_stale_pid_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = build_config(Path(tmpdir))
@@ -320,6 +330,156 @@ class SessionMigrationTests(unittest.TestCase):
             state = load_task_state(config, "task-main-001")
             self.assertTrue(state["pending_feedback"])
             self.assertEqual(state["followup_last_action"], "buffered_session_migration_cutover")
+
+    def test_successor_bootstrap_after_closeout_creates_new_session_and_migrates_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            base_spec = {
+                "task_id": "task-main-001",
+                "task_key": "task-main",
+                "codex_session_id": "session-old-001",
+                "agent_name": "toposem-agent",
+                "proposal_path": "/home/Awei/project/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "closeout_proposal_dir": "/home/Awei/project/closeout",
+                "closeout_proposal_dir_source": "explicit",
+                "project_history_file": "/home/Awei/project/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "feedback_mode": "auto",
+                "codex_exec_mode": "dangerous",
+                "workdir": "/home/Awei/project",
+                "command": "python train.py",
+                "execution_mode": "shell",
+                "resume_timeout_seconds": 3600,
+                "prompt_max_chars": 12000,
+                "fallback_provider": "",
+            }
+            write_task_spec(config, "task-main-001", dict(base_spec))
+            write_task_state(
+                config,
+                "task-main-001",
+                {
+                    "version": 1,
+                    "task_id": "task-main-001",
+                    "task_key": "task-main",
+                    "status": "completed",
+                    "feedback_mode": "auto",
+                    "agent_name": "toposem-agent",
+                    "codex_session_id": "session-old-001",
+                    "submitted_at": "2026-03-20T00:00:00Z",
+                    "updated_at": "2026-03-20T00:00:00Z",
+                },
+            )
+            queue_feedback_resume(
+                config,
+                task_id="task-main-001",
+                spec=base_spec,
+                event={
+                    "status": "completed",
+                    "event_path": "/tmp/task-main-event.json",
+                    "feedback_data_path": "/tmp/task-main-feedback.json",
+                    "command_log_path": "/tmp/task-main.log",
+                    "runner_log_path": "/tmp/task-main-runner.log",
+                    "failure_kind": "completed",
+                    "failure_summary": "Task done.",
+                    "duration_seconds": 5,
+                    "artifact_context": [],
+                    "log_tail": "",
+                },
+                reason="recent_activity",
+                min_idle_seconds=1,
+            )
+            set_continuous_research_mode(
+                config,
+                enabled=True,
+                codex_session_id="session-old-001",
+                updated_by="test",
+                source="unit",
+            )
+
+            def fake_bootstrap(
+                _config: AppConfig,
+                *,
+                mode: str,
+                prompt: str,
+                output_last_message_path: str,
+                codex_exec_mode: str,
+                workdir: str,
+                timeout_seconds: int,
+                log_path: Path,
+                model: str = "",
+                session_id: str = "",
+                max_continue_attempts: int = 3,
+                spec: dict[str, object] | None = None,
+                feedback_source_kind: str = "",
+                feedback_source_key: str = "",
+                feedback_task_id: str = "",
+                feedback_task_ids: list[str] | None = None,
+                feedback_followup_key: str = "",
+                requested_session_id: str = "",
+                track_resume_feedback: bool = False,
+            ) -> dict[str, object]:
+                del (
+                    _config,
+                    codex_exec_mode,
+                    workdir,
+                    timeout_seconds,
+                    log_path,
+                    model,
+                    session_id,
+                    max_continue_attempts,
+                    spec,
+                    feedback_source_kind,
+                    feedback_source_key,
+                    feedback_task_id,
+                    feedback_task_ids,
+                    feedback_followup_key,
+                    requested_session_id,
+                    track_resume_feedback,
+                )
+                self.assertEqual(mode, "exec")
+                self.assertIn("强制开启的新 planning session", prompt)
+                Path(output_last_message_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(output_last_message_path).write_text(
+                    "successor planning done\nTASKBOARD_SIGNAL=EXECUTION_READY\nTASKBOARD_SELF_CHECK=pass\nLIVE_TASK_STATUS=none\n",
+                    encoding="utf-8",
+                )
+                return {
+                    "completed": subprocess.CompletedProcess(args=["codex"], returncode=0, stdout="session: session-new-001", stderr=""),
+                    "session_id": "session-new-001",
+                    "message_written": True,
+                    "last_message_text": Path(output_last_message_path).read_text(encoding="utf-8"),
+                    "continue_attempts": 0,
+                    "recovered_with_continue": False,
+                }
+
+            with patch("codex_taskboard.cli.run_codex_prompt_with_continue_recovery", side_effect=fake_bootstrap), patch(
+                "codex_taskboard.cli.codex_session_exists_for_spec",
+                return_value=True,
+            ), patch("codex_taskboard.cli.signal_process_group"), patch("codex_taskboard.cli.pid_exists", return_value=False):
+                result = bootstrap_successor_session_after_closeout(
+                    config,
+                    task_id="task-main-001",
+                    spec=base_spec,
+                    predecessor_session_id="session-old-001",
+                    resolve_followup_key=followup_key_for(base_spec),
+                    updated_by="test",
+                    source="unit",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["successor_session_id"], "session-new-001")
+            self.assertEqual(result["taskboard_signal"], "EXECUTION_READY")
+            self.assertEqual(load_task_spec(config, "task-main-001")["codex_session_id"], "session-new-001")
+            self.assertTrue(load_continuous_research_mode(config, codex_session_id="session-new-001")["enabled"])
+            old_queued_key = queued_feedback_key_for(base_spec)
+            new_queued_key = queued_feedback_key_for({**base_spec, "codex_session_id": "session-new-001"})
+            self.assertFalse(followup_path(config, old_queued_key).exists())
+            self.assertTrue(followup_path(config, new_queued_key).exists())
+            migration = session_migration_entry(config, "session-old-001")
+            self.assertEqual(migration["state"], "completed")
+            self.assertEqual(migration["to_session_id"], "session-new-001")
 
 
 if __name__ == "__main__":

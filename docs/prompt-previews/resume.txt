@@ -4,14 +4,14 @@ proposal_file: [/home/Awei/project/docs/PROPOSAL.md]
 closeout_proposal_dir: [/home/Awei/project/docs/closeout]
 project_history_file: [/home/Awei/project/docs/HISTORY.md]
 project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
-authoritative proposal 以上面的 proposal_file 为准。
-本轮可靠结果、关键诊断结论和 next bounded action 默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。
+当前 proposal 以上面的 proposal_file 为准。
+本轮可靠结果、关键诊断结论和下一步明确动作默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。
 
 不要重置对话；把下面这批新增结果并入当前主线继续推进。
 回流来源：一个已停止的后台任务
 先吸收新增结果，再判断它改变了什么、现在顺手还能做完什么、以及下一步最值得做的具体动作。
-Evidence-first：
-- 先读已经落盘的 summary / report / log / artifact，提炼关键数字、异常点和它们意味着什么，再决定当前唯一最高优先级动作。
+先证据，后动作：
+- 先读已经落盘的 summary / report / log / 结果文件，提炼关键数字、异常点和它们意味着什么，再决定当前唯一最高优先级动作。
 - 先把新增证据并回 proposal/history，再判断是继续执行、提交实验，还是进入 closeout。
 
 任务摘要：
@@ -27,7 +27,7 @@ feedback_data_file: [/tmp/taskboard-preview-feedback.json]
 runner_log: [/tmp/taskboard-preview-runner.log]
 task_note: prompt preview sample
 
-artifact_paths:
+结果文件路径：
 - pattern: stage_summary.json | path: [/tmp/stage_summary.json]
 
 taskboard 使用说明：

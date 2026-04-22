@@ -12,6 +12,7 @@ from codex_taskboard.cli import (
     build_continuous_planning_prompt,
     build_continuous_research_prompt,
     build_continuous_transition_prompt,
+    build_successor_bootstrap_prompt,
     build_standard_followup_prompt,
     clear_reflow_backlog,
     extract_taskboard_protocol_footer,
@@ -147,7 +148,26 @@ class FollowupTests(unittest.TestCase):
 
         self.assertIn("你现在处于 closeout。", prompt)
         self.assertIn("handoff 确认", prompt)
-        self.assertIn("TASKBOARD_SIGNAL` 默认写 `none`", prompt)
+        self.assertIn("强制开启新的 Codex session", prompt)
+
+    def test_build_successor_bootstrap_prompt_forces_new_session_planning(self) -> None:
+        prompt = build_successor_bootstrap_prompt(
+            {
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "closeout_proposal_dir": "/tmp/closeout",
+                "closeout_proposal_dir_source": "explicit",
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+            },
+            predecessor_session_id="session-closeout-001",
+            trigger_signal="none",
+        )
+
+        self.assertIn("强制开启的新 planning session", prompt)
+        self.assertIn("上一轮已收口的 session", prompt)
+        self.assertIn("planning 不要用 `TASKBOARD_SIGNAL=none` 停住", prompt)
 
     def test_managed_mode_only_becomes_active_after_explicit_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

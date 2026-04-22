@@ -45,9 +45,15 @@ closeout 不是“可以停了”，而是把当前阶段加工成下一位 agen
 - 给下一轮 planning 准备好明确入口
 """
 
+successor_bootstrap_intro = """
+这是 closeout 完成后由 taskboard 强制开启的新 planning session。
+旧 session 的职责只剩存档与追溯；新的规划、后续回流和下一轮实验都从这个新 session 继续。
+不要再回头证明上一轮是不是已经结束；请直接接住 handoff、history、proposal 和关键结果，判断下一轮最值得推进的问题，并说明理由。
+"""
+
 evidence_first = """
-Evidence-first：
-- 先读已经落盘的 summary / report / log / artifact，提炼关键数字、异常点和它们意味着什么，再决定当前唯一最高优先级动作。
+先证据，后动作：
+- 先读已经落盘的 summary / report / log / 结果文件，提炼关键数字、异常点和它们意味着什么，再决定当前唯一最高优先级动作。
 - 先把新增证据并回 proposal/history，再判断是继续执行、提交实验，还是进入 closeout。
 """
 
