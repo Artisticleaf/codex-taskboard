@@ -13,6 +13,7 @@ class CodexRuntimeHooks:
     build_remote_codex_command: Callable[..., list[str]]
     build_codex_resume_command: Callable[..., list[str]]
     build_codex_exec_command: Callable[..., list[str]]
+    run_local_interactive_codex: Callable[..., dict[str, Any]]
     run_tracked_feedback_subprocess: Callable[..., subprocess.CompletedProcess[str]]
     run_subprocess: Callable[..., subprocess.CompletedProcess[str]]
     extract_remote_last_message: Callable[[str], tuple[str, str]]
@@ -113,6 +114,7 @@ def run_codex_prompt_with_continue_recovery(
                 prompt=current_prompt,
                 output_last_message_path=output_last_message_path,
                 codex_exec_mode=codex_exec_mode,
+                workdir=workdir,
             )
         else:
             command = hooks.build_codex_exec_command(
@@ -128,7 +130,36 @@ def run_codex_prompt_with_continue_recovery(
             "resume" if current_mode == "resume" and current_session_id else ""
         )
         should_track_resume_feedback = bool(track_resume_feedback and current_mode == "resume" and current_session_id)
-        if tracking_source_kind and should_track_resume_feedback:
+        message_written = False
+        last_message_text = ""
+        parsed_session_id = ""
+        if not use_remote_codex:
+            interactive_result = hooks.run_local_interactive_codex(
+                config,
+                command=command,
+                mode=current_mode,
+                workdir=workdir,
+                prompt=current_prompt,
+                session_id=current_session_id,
+                output_last_message_path=output_last_message_path,
+                timeout_seconds=timeout_seconds,
+                log_path=log_path,
+                requested_session_id=normalized_requested_session_id or current_session_id,
+                feedback_source_kind=tracking_source_kind if should_track_resume_feedback else "",
+                feedback_source_key=str(feedback_source_key or current_session_id).strip() if should_track_resume_feedback else "",
+                feedback_task_id=feedback_task_id if should_track_resume_feedback else "",
+                feedback_task_ids=feedback_task_ids if should_track_resume_feedback else None,
+                feedback_followup_key=feedback_followup_key if should_track_resume_feedback else "",
+                command_started_at=command_started_at,
+            )
+            completed = interactive_result["completed"]
+            combined_stdout = str(completed.stdout)
+            parsed_session_id = str(interactive_result.get("session_id", "") or "")
+            if parsed_session_id and not current_session_id:
+                current_session_id = parsed_session_id
+            message_written = bool(interactive_result.get("message_written", False))
+            last_message_text = str(interactive_result.get("last_message_text", "") or "")
+        elif tracking_source_kind and should_track_resume_feedback:
             completed = hooks.run_tracked_feedback_subprocess(
                 config,
                 command,
@@ -142,22 +173,36 @@ def run_codex_prompt_with_continue_recovery(
                 task_ids=feedback_task_ids,
                 followup_key=feedback_followup_key,
             )
+            combined_stdout = str(completed.stdout)
         else:
             completed = hooks.run_subprocess(command, cwd=workdir, timeout=timeout_seconds)
-        combined_stdout = str(completed.stdout)
+            combined_stdout = str(completed.stdout)
         if use_remote_codex:
             remote_message, combined_stdout = hooks.extract_remote_last_message(combined_stdout)
             if remote_message:
                 hooks.ensure_dir(message_path.parent)
                 message_path.write_text(remote_message, encoding="utf-8")
         combined = f"{combined_stdout}\n{completed.stderr}"
-        parsed_session_id = hooks.extract_codex_session_id(combined)
-        if parsed_session_id and not current_session_id:
-            current_session_id = parsed_session_id
-        message_written = message_path.exists() and message_path.stat().st_size > 0
-        last_message_text = ""
-        if message_written:
-            last_message_text = message_path.read_text(encoding="utf-8", errors="ignore")
+        if use_remote_codex:
+            parsed_session_id = hooks.extract_codex_session_id(combined)
+            if parsed_session_id and not current_session_id:
+                current_session_id = parsed_session_id
+            message_written = message_path.exists() and message_path.stat().st_size > 0
+            last_message_text = ""
+            if message_written:
+                last_message_text = message_path.read_text(encoding="utf-8", errors="ignore")
+        else:
+            if not parsed_session_id:
+                parsed_session_id = hooks.extract_codex_session_id(combined)
+                if parsed_session_id and not current_session_id:
+                    current_session_id = parsed_session_id
+            if last_message_text and not message_written:
+                hooks.ensure_dir(message_path.parent)
+                message_path.write_text(last_message_text, encoding="utf-8")
+                message_written = True
+            elif message_path.exists() and message_path.stat().st_size > 0:
+                message_written = True
+                last_message_text = message_path.read_text(encoding="utf-8", errors="ignore")
         if not last_message_text and not use_remote_codex and hooks.allow_local_rollout_fallback(
             config,
             mode=current_mode,
@@ -558,15 +603,26 @@ def resume_codex_session_with_prompt(
             prompt=prompt,
             output_last_message_path=str(fallback_output_path),
             codex_exec_mode=spec["codex_exec_mode"],
+            workdir=spec["workdir"],
         )
-        fallback_completed = hooks.run_subprocess(
-            fallback_command,
-            cwd=spec["workdir"],
-            timeout=int(spec["resume_timeout_seconds"]),
+        fallback_exec_result = hooks.run_local_interactive_codex(
+            config,
+            command=fallback_command,
+            mode="resume",
+            workdir=spec["workdir"],
+            prompt=prompt,
+            session_id=cloned_session_id,
+            output_last_message_path=str(fallback_output_path),
+            timeout_seconds=int(spec["resume_timeout_seconds"]),
+            log_path=hooks.task_runner_log_path(config, spec["task_id"]),
+            requested_session_id=cloned_session_id,
         )
+        fallback_completed = fallback_exec_result["completed"]
         fallback_message_text = ""
         if fallback_output_path.exists():
             fallback_message_text = fallback_output_path.read_text(encoding="utf-8", errors="ignore")
+        if not fallback_message_text:
+            fallback_message_text = str(fallback_exec_result.get("last_message_text", "") or "")
         fallback_signal_source = hooks.extract_text_tail_signal_source(
             (fallback_message_text or str(result.get("last_message_text", ""))).strip(),
             str(fallback_completed.stdout or ""),

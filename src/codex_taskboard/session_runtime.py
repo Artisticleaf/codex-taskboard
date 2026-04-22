@@ -211,7 +211,7 @@ def active_codex_resume_pids_for_session(
         if not cmdline:
             continue
         normalized_cmdline = f" {cmdline} "
-        if " exec resume " not in normalized_cmdline:
+        if " resume " not in normalized_cmdline:
             continue
         if normalized_session_id not in normalized_cmdline:
             continue

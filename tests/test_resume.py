@@ -11,7 +11,7 @@ from codex_taskboard.cli import (
     resume_codex_session,
     resume_codex_session_with_prompt,
     session_output_busy_snapshot,
-    set_human_guidance_mode,
+    set_automation_mode,
     task_last_message_path,
 )
 
@@ -120,26 +120,29 @@ class ResumeTests(unittest.TestCase):
                 "artifact_context": [],
             }
 
-            def fake_run_tracked_feedback_subprocess(
+            def fake_run_local_interactive_codex(
                 _config: AppConfig,
-                command: list[str],
                 *,
-                cwd: str,
-                timeout: int,
+                command: list[str],
+                output_last_message_path: str,
                 **_kwargs: object,
-            ) -> subprocess.CompletedProcess[str]:
-                output_index = command.index("-o") + 1
-                Path(command[output_index]).write_text("assistant reply\n", encoding="utf-8")
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=-6,
-                    stdout="assistant reply\n",
-                    stderr="node assertion\n",
-                )
+            ) -> dict[str, object]:
+                Path(output_last_message_path).write_text("assistant reply\n", encoding="utf-8")
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=-6,
+                        stdout="assistant reply\n",
+                        stderr="node assertion\n",
+                    ),
+                    "session_id": "session-123",
+                    "message_written": True,
+                    "last_message_text": "assistant reply\n",
+                }
 
             with patch(
-                "codex_taskboard.cli.run_tracked_feedback_subprocess",
-                side_effect=fake_run_tracked_feedback_subprocess,
+                "codex_taskboard.cli.run_local_interactive_codex",
+                side_effect=fake_run_local_interactive_codex,
             ):
                 result = resume_codex_session(config, spec, event)
 
@@ -257,24 +260,27 @@ class ResumeTests(unittest.TestCase):
                 "fallback_provider": "",
             }
 
-            def fake_run_tracked_feedback_subprocess(
+            def fake_run_local_interactive_codex(
                 _config: AppConfig,
-                command: list[str],
                 *,
-                cwd: str,
-                timeout: int,
+                command: list[str],
                 **_kwargs: object,
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=1,
-                    stdout="session id: session-123\n",
-                    stderr="exceeded retry limit, last status: 429 Too Many Requests",
-                )
+            ) -> dict[str, object]:
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="session id: session-123\n",
+                        stderr="exceeded retry limit, last status: 429 Too Many Requests",
+                    ),
+                    "session_id": "session-123",
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
             with patch(
-                "codex_taskboard.cli.run_tracked_feedback_subprocess",
-                side_effect=fake_run_tracked_feedback_subprocess,
+                "codex_taskboard.cli.run_local_interactive_codex",
+                side_effect=fake_run_local_interactive_codex,
             ), patch(
                 "codex_taskboard.cli.time.sleep",
                 return_value=None,
@@ -349,24 +355,27 @@ class ResumeTests(unittest.TestCase):
                 "fallback_provider": "",
             }
 
-            def fake_run_tracked_feedback_subprocess(
+            def fake_run_local_interactive_codex(
                 _config: AppConfig,
-                command: list[str],
                 *,
-                cwd: str,
-                timeout: int,
+                command: list[str],
                 **_kwargs: object,
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=1,
-                    stdout="session id: session-123\n",
-                    stderr="503 Service Unavailable: server overloaded",
-                )
+            ) -> dict[str, object]:
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="session id: session-123\n",
+                        stderr="503 Service Unavailable: server overloaded",
+                    ),
+                    "session_id": "session-123",
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
             with patch(
-                "codex_taskboard.cli.run_tracked_feedback_subprocess",
-                side_effect=fake_run_tracked_feedback_subprocess,
+                "codex_taskboard.cli.run_local_interactive_codex",
+                side_effect=fake_run_local_interactive_codex,
             ), patch(
                 "codex_taskboard.cli.time.sleep",
                 return_value=None,
@@ -399,24 +408,27 @@ class ResumeTests(unittest.TestCase):
                 "fallback_provider": "",
             }
 
-            def fake_run_tracked_feedback_subprocess(
+            def fake_run_local_interactive_codex(
                 _config: AppConfig,
-                command: list[str],
                 *,
-                cwd: str,
-                timeout: int,
+                command: list[str],
                 **_kwargs: object,
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=1,
-                    stdout="session id: session-123\n",
-                    stderr="401 Unauthorized: invalid api key",
-                )
+            ) -> dict[str, object]:
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="session id: session-123\n",
+                        stderr="401 Unauthorized: invalid api key",
+                    ),
+                    "session_id": "session-123",
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
             with patch(
-                "codex_taskboard.cli.run_tracked_feedback_subprocess",
-                side_effect=fake_run_tracked_feedback_subprocess,
+                "codex_taskboard.cli.run_local_interactive_codex",
+                side_effect=fake_run_local_interactive_codex,
             ), patch(
                 "codex_taskboard.cli.time.sleep",
                 return_value=None,
@@ -450,24 +462,27 @@ class ResumeTests(unittest.TestCase):
                 "fallback_provider": "",
             }
 
-            def fake_run_tracked_feedback_subprocess(
+            def fake_run_local_interactive_codex(
                 _config: AppConfig,
-                command: list[str],
                 *,
-                cwd: str,
-                timeout: int,
+                command: list[str],
                 **_kwargs: object,
-            ) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=1,
-                    stdout="session id: session-busy\n",
-                    stderr="conversation is busy, another response is in progress",
-                )
+            ) -> dict[str, object]:
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="session id: session-busy\n",
+                        stderr="conversation is busy, another response is in progress",
+                    ),
+                    "session_id": "session-busy",
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
             with patch(
-                "codex_taskboard.cli.run_tracked_feedback_subprocess",
-                side_effect=fake_run_tracked_feedback_subprocess,
+                "codex_taskboard.cli.run_local_interactive_codex",
+                side_effect=fake_run_local_interactive_codex,
             ), patch(
                 "codex_taskboard.cli.time.sleep",
                 return_value=None,
@@ -524,12 +539,10 @@ class ResumeTests(unittest.TestCase):
                 "resume_timeout_seconds": 30,
                 "fallback_provider": "",
             }
-            set_human_guidance_mode(
+            set_automation_mode(
                 config,
-                active=True,
+                mode="managed",
                 codex_session_id="session-human-pause",
-                lease_seconds=900,
-                reason="manual steer",
                 updated_by="test",
                 source="unit",
             )
@@ -544,7 +557,7 @@ class ResumeTests(unittest.TestCase):
 
             self.assertFalse(result["ok"])
             self.assertTrue(result["deferred"])
-            self.assertEqual(result["deferred_reason"], "human_guidance_pause")
+            self.assertEqual(result["deferred_reason"], "managed_mode_pause")
             self.assertFalse(result["attempted"])
 
 

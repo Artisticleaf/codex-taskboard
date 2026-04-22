@@ -4806,6 +4806,7 @@ def codex_runtime_hooks() -> CodexRuntimeHooks:
         build_remote_codex_command=build_remote_codex_command,
         build_codex_resume_command=build_codex_resume_command,
         build_codex_exec_command=build_codex_exec_command,
+        run_local_interactive_codex=run_local_interactive_codex,
         run_tracked_feedback_subprocess=run_tracked_feedback_subprocess,
         run_subprocess=run_subprocess,
         extract_remote_last_message=extract_remote_last_message,
@@ -8314,6 +8315,337 @@ def tmux_session_exists(config: AppConfig, session_name: str) -> bool:
     return completed.returncode == 0
 
 
+LOCAL_CODEX_INTERACTIVE_CAPTURE_LINES = 240
+LOCAL_CODEX_INTERACTIVE_POLL_SECONDS = 1.0
+LOCAL_CODEX_TRUST_PROMPT_TEXT = "Do you trust the contents of this directory?"
+LOCAL_CODEX_ERROR_PATTERNS = (
+    "429 too many requests",
+    "retry limit",
+    "503 service unavailable",
+    "401 unauthorized",
+    "conversation is busy",
+    "session is busy",
+    "another response is in progress",
+    "upstream proxy error",
+    "中转站错误",
+)
+
+
+def tmux_capture_pane_text(config: AppConfig, session_name: str, *, start_line: int = -LOCAL_CODEX_INTERACTIVE_CAPTURE_LINES) -> str:
+    completed = subprocess.run(
+        tmux_command(config, "capture-pane", "-p", "-S", str(start_line), "-t", session_name),
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return ""
+    return str(completed.stdout or "")
+
+
+def tmux_send_keys(config: AppConfig, session_name: str, *keys: str) -> bool:
+    if not keys:
+        return False
+    completed = subprocess.run(
+        tmux_command(config, "send-keys", "-t", session_name, *keys),
+        text=True,
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+def tmux_session_attached_count(config: AppConfig, session_name: str) -> int:
+    completed = subprocess.run(
+        tmux_command(config, "display-message", "-p", "-t", session_name, "#{session_attached}"),
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return 0
+    try:
+        return max(0, int(str(completed.stdout or "").strip() or "0"))
+    except ValueError:
+        return 0
+
+
+def tmux_kill_session(config: AppConfig, session_name: str) -> None:
+    subprocess.run(tmux_command(config, "kill-session", "-t", session_name), text=True, capture_output=True)
+
+
+def tmux_pane_pid(config: AppConfig, session_name: str) -> int:
+    completed = subprocess.run(
+        tmux_command(config, "list-panes", "-t", session_name, "-F", "#{pane_pid}"),
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return 0
+    first_line = str(completed.stdout or "").splitlines()
+    if not first_line:
+        return 0
+    try:
+        return max(0, int(first_line[0].strip() or "0"))
+    except ValueError:
+        return 0
+
+
+def local_interactive_prompt_matches(expected_prompt: str, actual_prompt: str) -> bool:
+    expected = str(expected_prompt or "").strip()
+    actual = str(actual_prompt or "").strip()
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+    prefix_chars = min(240, len(expected), len(actual))
+    return prefix_chars > 0 and expected[:prefix_chars] == actual[:prefix_chars]
+
+
+def find_recent_local_thread_for_prompt(
+    config: AppConfig,
+    *,
+    workdir: str,
+    prompt: str,
+    min_updated_at: float,
+    limit: int = 20,
+) -> dict[str, Any] | None:
+    if not config.threads_db_path.exists():
+        return None
+    normalized_workdir = str(Path(workdir).expanduser().resolve())
+    min_updated_at_seconds = max(0, int(math.floor(float(min_updated_at or 0.0))) - 5)
+    conn = sqlite3.connect(config.threads_db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, cwd, updated_at, title, first_user_message, source
+            FROM threads
+            WHERE cwd = ? AND updated_at >= ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (normalized_workdir, min_updated_at_seconds, max(1, int(limit or 1))),
+        ).fetchall()
+    finally:
+        conn.close()
+    candidates = [dict(row) for row in rows]
+    for candidate in candidates:
+        if local_interactive_prompt_matches(prompt, str(candidate.get("first_user_message", ""))):
+            return candidate
+    for candidate in candidates:
+        if local_interactive_prompt_matches(prompt, str(candidate.get("title", ""))):
+            return candidate
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def local_interactive_error_text(text: str) -> str:
+    normalized = str(text or "").lower()
+    for pattern in LOCAL_CODEX_ERROR_PATTERNS:
+        if pattern in normalized:
+            return pattern
+    return ""
+
+
+def local_interactive_prompt_is_idle(text: str) -> bool:
+    tail = "\n".join(str(text or "").splitlines()[-40:])
+    if "Working" in tail or "esc to interrupt" in tail:
+        return False
+    return "› " in tail or "\n> " in tail
+
+
+def run_local_interactive_codex(
+    config: AppConfig,
+    *,
+    command: list[str],
+    mode: str,
+    workdir: str,
+    prompt: str,
+    session_id: str,
+    output_last_message_path: str,
+    timeout_seconds: int,
+    log_path: Path,
+    requested_session_id: str = "",
+    feedback_source_kind: str = "",
+    feedback_source_key: str = "",
+    feedback_task_id: str = "",
+    feedback_task_ids: list[str] | None = None,
+    feedback_followup_key: str = "",
+    command_started_at: float | None = None,
+) -> dict[str, Any]:
+    normalized_workdir = str(Path(workdir).expanduser().resolve())
+    message_path = Path(output_last_message_path)
+    ensure_dir(message_path.parent)
+    if command_started_at is None:
+        command_started_at = time.time()
+    tmux_session_name = f"ctb-codex-wakeup-{mode}-{secrets.token_hex(6)}"
+    shell_lines = [
+        "set -e",
+        f"export CODEX_HOME={shlex.quote(str(config.codex_home))}",
+        f"cd {shlex.quote(normalized_workdir)}",
+        f"exec {shlex.join(command)}",
+    ]
+    launch_command = [
+        *tmux_command(config, "new-session"),
+        "-d",
+        "-s",
+        tmux_session_name,
+        "bash",
+        "-lc",
+        "\n".join(shell_lines),
+    ]
+    launch_completed = run_subprocess(launch_command, cwd=normalized_workdir, timeout=30)
+    append_log(
+        log_path,
+        f"local_interactive_launch mode={mode} tmux_session={tmux_session_name} returncode={launch_completed.returncode} stdout_tail={str(launch_completed.stdout or '')[-1000:]} stderr_tail={str(launch_completed.stderr or '')[-1000:]}",
+    )
+    if launch_completed.returncode != 0:
+        completed = subprocess.CompletedProcess(
+            command,
+            launch_completed.returncode,
+            str(launch_completed.stdout or ""),
+            str(launch_completed.stderr or ""),
+        )
+        return {
+            "completed": completed,
+            "session_id": str(session_id or "").strip(),
+            "message_written": False,
+            "last_message_text": "",
+        }
+
+    pane_pid = tmux_pane_pid(config, tmux_session_name)
+    operation_id = ""
+    normalized_session_id = str(session_id or "").strip()
+    normalized_requested_session_id = str(requested_session_id or normalized_session_id).strip()
+    if normalized_session_id and feedback_source_kind:
+        operation_id = secrets.token_hex(12)
+        register_active_feedback_runtime(
+            config,
+            operation_id=operation_id,
+            session_id=normalized_session_id,
+            requested_session_id=normalized_requested_session_id or normalized_session_id,
+            pid=pane_pid,
+            pgid=pane_pid,
+            source_kind=feedback_source_kind,
+            source_key=str(feedback_source_key or normalized_session_id).strip() or normalized_session_id,
+            task_id=feedback_task_id,
+            task_ids=feedback_task_ids,
+            followup_key=feedback_followup_key,
+        )
+
+    trust_ack_sent = False
+    last_pane_text = ""
+    last_message_text = ""
+    detected_error = ""
+    deadline = command_started_at + max(1, int(timeout_seconds or 1))
+
+    def close_tmux_if_safe() -> None:
+        if tmux_session_exists(config, tmux_session_name) and tmux_session_attached_count(config, tmux_session_name) == 0:
+            tmux_kill_session(config, tmux_session_name)
+
+    try:
+        while time.time() < deadline:
+            pane_text = tmux_capture_pane_text(config, tmux_session_name)
+            if pane_text:
+                last_pane_text = pane_text
+            if not trust_ack_sent and LOCAL_CODEX_TRUST_PROMPT_TEXT in last_pane_text:
+                if tmux_send_keys(config, tmux_session_name, "Enter"):
+                    trust_ack_sent = True
+                    append_log(log_path, f"local_interactive_trust_ack tmux_session={tmux_session_name}")
+                    time.sleep(1)
+                    continue
+            if not normalized_session_id and mode != "resume":
+                thread = find_recent_local_thread_for_prompt(
+                    config,
+                    workdir=normalized_workdir,
+                    prompt=prompt,
+                    min_updated_at=command_started_at,
+                )
+                if thread is not None:
+                    normalized_session_id = str(thread.get("id", "")).strip()
+            if normalized_session_id:
+                last_message_text = latest_local_assistant_message_for_session(
+                    config,
+                    normalized_session_id,
+                    min_mtime=command_started_at,
+                    min_entry_ts=command_started_at,
+                )
+                if last_message_text:
+                    message_path.write_text(last_message_text, encoding="utf-8")
+                    close_tmux_if_safe()
+                    completed = subprocess.CompletedProcess(command, 0, last_pane_text, "")
+                    return {
+                        "completed": completed,
+                        "session_id": normalized_session_id,
+                        "message_written": True,
+                        "last_message_text": last_message_text,
+                    }
+            detected_error = local_interactive_error_text(last_pane_text)
+            if detected_error and local_interactive_prompt_is_idle(last_pane_text):
+                append_log(
+                    log_path,
+                    f"local_interactive_error_detected tmux_session={tmux_session_name} session_id={normalized_session_id} pattern={detected_error}",
+                )
+                close_tmux_if_safe()
+                completed = subprocess.CompletedProcess(command, 1, last_pane_text, "")
+                return {
+                    "completed": completed,
+                    "session_id": normalized_session_id,
+                    "message_written": False,
+                    "last_message_text": "",
+                }
+            if not tmux_session_exists(config, tmux_session_name):
+                break
+            time.sleep(LOCAL_CODEX_INTERACTIVE_POLL_SECONDS)
+
+        if not normalized_session_id and mode != "resume":
+            thread = find_recent_local_thread_for_prompt(
+                config,
+                workdir=normalized_workdir,
+                prompt=prompt,
+                min_updated_at=command_started_at,
+            )
+            if thread is not None:
+                normalized_session_id = str(thread.get("id", "")).strip()
+        if normalized_session_id:
+            last_message_text = latest_local_assistant_message_for_session(
+                config,
+                normalized_session_id,
+                min_mtime=command_started_at,
+                min_entry_ts=command_started_at,
+            )
+            if last_message_text:
+                message_path.write_text(last_message_text, encoding="utf-8")
+                close_tmux_if_safe()
+                completed = subprocess.CompletedProcess(command, 0, last_pane_text, "")
+                return {
+                    "completed": completed,
+                    "session_id": normalized_session_id,
+                    "message_written": True,
+                    "last_message_text": last_message_text,
+                }
+        timed_out = time.time() >= deadline
+        append_log(
+            log_path,
+            f"local_interactive_exit mode={mode} tmux_session={tmux_session_name} session_id={normalized_session_id} timed_out={timed_out} error_pattern={detected_error}",
+        )
+        close_tmux_if_safe()
+        completed = subprocess.CompletedProcess(
+            command,
+            124 if timed_out else 1,
+            last_pane_text,
+            "timed out waiting for interactive Codex reply" if timed_out else "",
+        )
+        return {
+            "completed": completed,
+            "session_id": normalized_session_id,
+            "message_written": False,
+            "last_message_text": "",
+        }
+    finally:
+        if operation_id:
+            clear_active_feedback_runtime(config, operation_id)
+
+
 def validate_env_key(key: str) -> str:
     text = str(key).strip()
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
@@ -10042,16 +10374,18 @@ def build_codex_resume_command(
     prompt: str,
     output_last_message_path: str,
     codex_exec_mode: str,
+    workdir: str,
 ) -> list[str]:
+    del output_last_message_path
     command = [
         config.codex_bin,
-        "exec",
         "resume",
+        "--include-non-interactive",
+        "-C",
+        workdir,
+        "--no-alt-screen",
         session_id,
         prompt,
-        "--skip-git-repo-check",
-        "-o",
-        output_last_message_path,
     ]
     if codex_exec_mode == "dangerous":
         command.append("--dangerously-bypass-approvals-and-sandbox")
@@ -10069,14 +10403,12 @@ def build_codex_exec_command(
     workdir: str,
     model: str,
 ) -> list[str]:
+    del output_last_message_path
     command = [
         config.codex_bin,
-        "exec",
         "-C",
         workdir,
-        "--skip-git-repo-check",
-        "-o",
-        output_last_message_path,
+        "--no-alt-screen",
     ]
     if model:
         command.extend(["-m", model])

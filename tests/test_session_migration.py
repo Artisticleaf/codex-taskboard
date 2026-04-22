@@ -119,32 +119,30 @@ class SessionMigrationTests(unittest.TestCase):
                 "fallback_provider": "",
             }
 
-            def fake_run_subprocess(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
-                self.assertIn("session-new-001", command)
-                output_index = command.index("-o") + 1
-                Path(command[output_index]).write_text("assistant reply\n", encoding="utf-8")
-                return subprocess.CompletedProcess(args=command, returncode=0, stdout="assistant reply\n", stderr="")
-
-            def fake_run_tracked_feedback_subprocess(
+            def fake_run_local_interactive_codex(
                 _config,
-                command: list[str],
                 *,
-                cwd: str | None = None,
-                timeout: int | None = None,
-                session_id: str,
-                requested_session_id: str,
-                source_kind: str,
-                source_key: str,
-                task_id: str = "",
-                task_ids: list[str] | None = None,
-                followup_key: str = "",
-            ) -> subprocess.CompletedProcess[str]:
-                del _config, session_id, requested_session_id, source_kind, source_key, task_id, task_ids, followup_key
-                return fake_run_subprocess(command, cwd or "", int(timeout or 0))
+                command: list[str],
+                output_last_message_path: str,
+                **_kwargs,
+            ) -> dict[str, object]:
+                self.assertIn("session-new-001", command)
+                Path(output_last_message_path).write_text("assistant reply\n", encoding="utf-8")
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout="assistant reply\n",
+                        stderr="",
+                    ),
+                    "session_id": "session-new-001",
+                    "message_written": True,
+                    "last_message_text": "assistant reply\n",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run_subprocess), patch(
-                "codex_taskboard.cli.run_tracked_feedback_subprocess",
-                side_effect=fake_run_tracked_feedback_subprocess,
+            with patch(
+                "codex_taskboard.cli.run_local_interactive_codex",
+                side_effect=fake_run_local_interactive_codex,
             ):
                 result = resume_codex_session_with_prompt(
                     config,

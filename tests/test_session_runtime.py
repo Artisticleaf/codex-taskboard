@@ -118,6 +118,19 @@ class SessionRuntimeTests(unittest.TestCase):
 
         self.assertEqual(matches, [101])
 
+    def test_active_codex_resume_pids_for_session_matches_interactive_resume(self) -> None:
+        hooks = build_hooks(
+            list_proc_entries=lambda: [Path("/proc/303"), Path("/proc/404")],
+            read_pid_cmdline=lambda pid: {
+                303: "node /usr/local/bin/codex resume 019session-runtime-proc continue",
+                404: "node /usr/local/bin/codex start other-session",
+            }.get(pid, ""),
+        )
+
+        matches = active_codex_resume_pids_for_session("019session-runtime-proc", hooks=hooks)
+
+        self.assertEqual(matches, [303])
+
     def test_active_codex_resume_pids_for_session_tolerates_proc_scan_failure(self) -> None:
         hooks = build_hooks(list_proc_entries=lambda: (_ for _ in ()).throw(OSError("proc unavailable")))
 

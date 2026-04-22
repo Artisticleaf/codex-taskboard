@@ -53,24 +53,39 @@ class SubagentTests(unittest.TestCase):
             output_path = config.app_home / "out.txt"
             calls: list[list[str]] = []
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 calls.append(command)
                 if len(calls) == 1:
-                    return subprocess.CompletedProcess(
-                        args=command,
-                        returncode=1,
-                        stdout="",
-                        stderr="session id: 019test-session-0001\nexceeded retry limit, last status: 429 Too Many Requests, request id: abc\n",
-                    )
+                    return {
+                        "completed": subprocess.CompletedProcess(
+                            args=command,
+                            returncode=1,
+                            stdout="",
+                            stderr="session id: 019test-session-0001\nexceeded retry limit, last status: 429 Too Many Requests, request id: abc\n",
+                        ),
+                        "session_id": "019test-session-0001",
+                        "message_written": False,
+                        "last_message_text": "",
+                    }
                 output_path.write_text("recovered\n", encoding="utf-8")
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=0,
-                    stdout="recovered\n",
-                    stderr="",
-                )
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout="recovered\n",
+                        stderr="",
+                    ),
+                    "session_id": "019test-session-0001",
+                    "message_written": True,
+                    "last_message_text": "recovered\n",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch("codex_taskboard.cli.time.sleep"):
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch("codex_taskboard.cli.time.sleep"):
                 result = run_codex_prompt_with_continue_recovery(
                     config,
                     mode="exec",
@@ -96,24 +111,39 @@ class SubagentTests(unittest.TestCase):
             output_path = config.app_home / "out.txt"
             calls: list[list[str]] = []
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 calls.append(command)
                 if len(calls) == 1:
-                    return subprocess.CompletedProcess(
-                        args=command,
-                        returncode=1,
-                        stdout="session id: 019test-session-0002\n",
-                        stderr="503 Service Unavailable: server overloaded\n",
-                    )
+                    return {
+                        "completed": subprocess.CompletedProcess(
+                            args=command,
+                            returncode=1,
+                            stdout="session id: 019test-session-0002\n",
+                            stderr="503 Service Unavailable: server overloaded\n",
+                        ),
+                        "session_id": "019test-session-0002",
+                        "message_written": False,
+                        "last_message_text": "",
+                    }
                 output_path.write_text("recovered transient\n", encoding="utf-8")
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=0,
-                    stdout="recovered transient\n",
-                    stderr="",
-                )
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout="recovered transient\n",
+                        stderr="",
+                    ),
+                    "session_id": "019test-session-0002",
+                    "message_written": True,
+                    "last_message_text": "recovered transient\n",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch(
                 "codex_taskboard.cli.time.sleep"
             ) as sleep_mock:
                 result = run_codex_prompt_with_continue_recovery(
@@ -142,24 +172,39 @@ class SubagentTests(unittest.TestCase):
             output_path = config.app_home / "out.txt"
             calls: list[list[str]] = []
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 calls.append(command)
                 if len(calls) == 1:
-                    return subprocess.CompletedProcess(
-                        args=command,
-                        returncode=1,
-                        stdout="session id: 019test-session-0003\n",
-                        stderr="中转站错误: upstream proxy error\n",
-                    )
+                    return {
+                        "completed": subprocess.CompletedProcess(
+                            args=command,
+                            returncode=1,
+                            stdout="session id: 019test-session-0003\n",
+                            stderr="中转站错误: upstream proxy error\n",
+                        ),
+                        "session_id": "019test-session-0003",
+                        "message_written": False,
+                        "last_message_text": "",
+                    }
                 output_path.write_text("recovered relay\n", encoding="utf-8")
-                return subprocess.CompletedProcess(
-                    args=command,
-                    returncode=0,
-                    stdout="recovered relay\n",
-                    stderr="",
-                )
+                return {
+                    "completed": subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout="recovered relay\n",
+                        stderr="",
+                    ),
+                    "session_id": "019test-session-0003",
+                    "message_written": True,
+                    "last_message_text": "recovered relay\n",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch(
                 "codex_taskboard.cli.time.sleep"
             ) as sleep_mock:
                 result = run_codex_prompt_with_continue_recovery(
@@ -222,7 +267,12 @@ class SubagentTests(unittest.TestCase):
             session_id = "019followup-session-0001"
             output_path = config.app_home / "followup-last-message.txt"
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
                 rollout_dir.mkdir(parents=True, exist_ok=True)
                 rollout_path = rollout_dir / f"rollout-2026-03-19T00-00-00-{session_id}.jsonl"
@@ -246,9 +296,14 @@ class SubagentTests(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
-                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                return {
+                    "completed": subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr=""),
+                    "session_id": session_id,
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch(
                 "codex_taskboard.cli.time.time",
                 return_value=100.0,
             ):
@@ -274,7 +329,12 @@ class SubagentTests(unittest.TestCase):
             session_id = "019followup-session-invalid-json"
             output_path = config.app_home / "followup-last-message.txt"
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
                 rollout_dir.mkdir(parents=True, exist_ok=True)
                 rollout_path = rollout_dir / f"rollout-2026-03-19T00-00-00-{session_id}.jsonl"
@@ -303,9 +363,14 @@ class SubagentTests(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
-                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                return {
+                    "completed": subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr=""),
+                    "session_id": session_id,
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch(
                 "codex_taskboard.cli.time.time",
                 return_value=100.0,
             ):
@@ -331,7 +396,12 @@ class SubagentTests(unittest.TestCase):
             session_id = "019followup-session-0002"
             output_path = config.app_home / "followup-last-message.txt"
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
                 rollout_dir.mkdir(parents=True, exist_ok=True)
                 rollout_path = rollout_dir / f"rollout-2026-03-19T00-00-00-{session_id}.jsonl"
@@ -369,9 +439,14 @@ class SubagentTests(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
-                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                return {
+                    "completed": subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr=""),
+                    "session_id": session_id,
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch(
                 "codex_taskboard.cli.time.time",
                 return_value=200.0,
             ):
@@ -397,7 +472,12 @@ class SubagentTests(unittest.TestCase):
             session_id = "019followup-session-vscode"
             output_path = config.app_home / "followup-last-message.txt"
 
-            def fake_run(command: list[str], cwd: str, timeout: int) -> subprocess.CompletedProcess[str]:
+            def fake_run(
+                _config: AppConfig,
+                *,
+                command: list[str],
+                **_kwargs: object,
+            ) -> dict[str, object]:
                 rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
                 rollout_dir.mkdir(parents=True, exist_ok=True)
                 rollout_path = rollout_dir / f"rollout-2026-03-19T00-00-00-{session_id}.jsonl"
@@ -421,9 +501,14 @@ class SubagentTests(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
-                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                return {
+                    "completed": subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr=""),
+                    "session_id": session_id,
+                    "message_written": False,
+                    "last_message_text": "",
+                }
 
-            with patch("codex_taskboard.cli.run_subprocess", side_effect=fake_run), patch(
+            with patch("codex_taskboard.cli.run_local_interactive_codex", side_effect=fake_run), patch(
                 "codex_taskboard.cli.find_thread_info",
                 return_value={"id": session_id, "source": "vscode"},
             ), patch("codex_taskboard.cli.time.time", return_value=100.0):
