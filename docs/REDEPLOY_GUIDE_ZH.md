@@ -153,8 +153,7 @@ curl -sS \
 - 文档已重写为当前行为，没有残留历史事故说明。
 - `continuous-mode` 命令可用。
 - dashboard `c` 热键可用。
-- `NO_FURTHER_TASKS` 在 continuous mode 下不再直接停机。
-- `STOP_AUTOMATION` / `END_EXPERIMENT` 仍然是真正停机。
+- 当前公开信号只剩 `EXECUTION_READY` / `WAITING_ON_ASYNC` / `CLOSEOUT_READY` / `none`。
 - proposal 绑定、自动继承和 sidecar 规则已写入手册。
 - `closeout_proposal_dir` 参数、目录继承规则以及中文 close-out/proposal 写作要求已写入手册。
 - Docker/API 的 result-only 与自动科研两种模式都已说明。

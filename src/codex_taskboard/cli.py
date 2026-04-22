@@ -44,6 +44,9 @@ from codex_taskboard.api_auth import (
 from codex_taskboard.api_server import ApiServerHooks, serve_api
 from codex_taskboard.automation_state import (
     AutomationStateHooks,
+    automation_mode as automation_mode_impl,
+    automation_mode_is_managed as automation_mode_is_managed_impl,
+    automation_mode_label as automation_mode_label_impl,
     bind_continuous_research_mode_session as bind_continuous_research_mode_session_impl,
     bind_human_guidance_mode_session as bind_human_guidance_mode_session_impl,
     clear_all_continuous_research_mode as clear_all_continuous_research_mode_impl,
@@ -69,9 +72,11 @@ from codex_taskboard.automation_state import (
     park_continuous_research_session as park_continuous_research_session_impl,
     resolve_continuous_research_target_session_id as resolve_continuous_research_target_session_id_impl,
     resolve_human_guidance_target_session_id as resolve_human_guidance_target_session_id_impl,
+    set_automation_mode as set_automation_mode_impl,
     set_continuous_research_mode as set_continuous_research_mode_impl,
     set_human_guidance_mode as set_human_guidance_mode_impl,
     should_override_stop_signal_with_continuous_research as should_override_stop_signal_with_continuous_research_impl,
+    toggle_automation_mode as toggle_automation_mode_impl,
     toggle_continuous_research_mode as toggle_continuous_research_mode_impl,
     toggle_human_guidance_mode as toggle_human_guidance_mode_impl,
     update_continuous_research_session_state as update_continuous_research_session_state_impl,
@@ -333,9 +338,9 @@ MAX_ROLLOUT_OUTPUT_BUSY_TAIL_LINES = 2048
 DEFAULT_LOCAL_MICROSTEP_DELAY_SECONDS = 60
 DEFAULT_LOCAL_MICROSTEP_INTERVAL_SECONDS = 180
 DEFAULT_LOCAL_MICROSTEP_MIN_IDLE_SECONDS = 60
-DEFAULT_WAITING_ON_ASYNC_DELAY_SECONDS = 600
-DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS = 300
-DEFAULT_WAITING_ON_ASYNC_MIN_IDLE_SECONDS = 120
+DEFAULT_WAITING_ON_ASYNC_DELAY_SECONDS = 60 * 60
+DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS = 60 * 60
+DEFAULT_WAITING_ON_ASYNC_MIN_IDLE_SECONDS = 300
 CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD = 3
 CONTINUOUS_RESEARCH_LOCAL_FASTPATH_REPEAT_THRESHOLD = 4
 DEFAULT_API_BIND = "127.0.0.1"
@@ -362,15 +367,17 @@ PROJECT_HISTORY_FILE_ENV_KEY = "CODEX_TASKBOARD_PROJECT_HISTORY_FILE"
 PROJECT_HISTORY_FILE_SOURCE_ENV_KEY = "CODEX_TASKBOARD_PROJECT_HISTORY_FILE_SOURCE"
 PROJECT_HISTORY_FILE_ENV_KEYS = (PROJECT_HISTORY_FILE_ENV_KEY, PROJECT_HISTORY_FILE_SOURCE_ENV_KEY)
 CPU_PROFILE_CHOICES = ("auto", "single", "sidecar", "cpu_compute", "gpu_feeder", "hybrid")
-CONTINUOUS_RESEARCH_MODE_FILENAME = "continuous_research_mode.json"
+CONTINUOUS_RESEARCH_MODE_FILENAME = "automation_mode.json"
 HUMAN_GUIDANCE_MODE_FILENAME = "human_guidance_mode.json"
 SESSION_MIGRATIONS_FILENAME = "session_migrations.json"
 ACTIVE_FEEDBACK_RUNTIME_FILENAME = "active_feedback_runtime.json"
-CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL = "NEW_TASKS_STARTED"
-CONTINUOUS_RESEARCH_OVERRIDE_SIGNALS = {"NO_FURTHER_TASKS", "STOP_AUTOMATION", "END_EXPERIMENT"}
+EXECUTION_READY_SIGNAL = "EXECUTION_READY"
+CLOSEOUT_READY_SIGNAL = "CLOSEOUT_READY"
+CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL = EXECUTION_READY_SIGNAL
+CONTINUOUS_RESEARCH_OVERRIDE_SIGNALS = {CLOSEOUT_READY_SIGNAL}
 CONTINUOUS_RESEARCH_REASON = "continuous_research_after_no_further_tasks"
 CONTINUOUS_RESEARCH_IDLE_REASON = "continuous_research_session_idle"
-CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON = "continuous_research_parked_watchdog"
+CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON = "continuous_research_stall_recovery"
 CONTINUOUS_RESEARCH_NEXT_ACTION_REASON = "continuous_research_next_bounded_action"
 CONTINUOUS_RESEARCH_TRANSITION_REASON = "continuous_research_closeout_transition"
 PROPOSAL_MATERIALIZATION_REASON = "proposal_materialization"
@@ -385,7 +392,7 @@ MAX_CONTINUOUS_RESEARCH_PARKED_REMINDER_SECONDS = 8 * 60 * 60
 MAX_RECENT_PROJECT_HISTORY_LOG_SCAN_FILES = 5
 MAX_RECENT_PROJECT_HISTORY_LOG_CHARS = 24000
 MAX_RECENT_NEXT_ACTION_AGE_SECONDS = 3 * 24 * 60 * 60
-DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS = 15 * 60
+DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS = DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS
 DEFAULT_SESSION_MIGRATION_INTERRUPT_GRACE_SECONDS = 5
 MAX_PROPOSAL_GATE_SCAN_CHARS = 65536
 # `full` 保留给需要完整重述治理规则的权威型 prompt；后台 resume/followup
@@ -569,7 +576,7 @@ MANUAL_DECISION_GATE_KEYWORDS = (
     "manual_activation_required",
 )
 SUCCESS_TASKBOARD_SIGNALS = {"TASK_DONE", "START_NEXT_TASK"}
-STOP_FOLLOWUP_SIGNALS = {"NO_FURTHER_TASKS", "STOP_AUTOMATION", "END_EXPERIMENT"}
+STOP_FOLLOWUP_SIGNALS = {CLOSEOUT_READY_SIGNAL, "STOP_AUTOMATION"}
 LOCAL_MICROSTEP_BATCH_SIGNAL = "LOCAL_MICROSTEP_BATCH"
 LOCAL_CONTINUE_NO_WAKE_SIGNAL = "LOCAL_CONTINUE_NO_WAKE"
 WAITING_ON_ASYNC_SIGNAL = "WAITING_ON_ASYNC"
@@ -578,34 +585,38 @@ WAITING_ON_FEEDBACK_SIGNAL = "WAITING_ON_FEEDBACK"
 PARKED_IDLE_SIGNAL = "PARKED_IDLE"
 ANALYZING_NEW_EVIDENCE_SIGNAL = "ANALYZING_NEW_EVIDENCE"
 MATERIALS_READY_FOR_PROPOSAL_SIGNAL = "MATERIALS_READY_FOR_PROPOSAL"
-INLINE_CONTINUE_SIGNALS = {
-    LOCAL_CONTINUE_NO_WAKE_SIGNAL,
-}
-LOCAL_MICROSTEP_BATCH_SIGNALS = {
-    LOCAL_MICROSTEP_BATCH_SIGNAL,
-    ANALYZING_NEW_EVIDENCE_SIGNAL,
-    MATERIALS_READY_FOR_PROPOSAL_SIGNAL,
-}
+TASKBOARD_RESEARCH_PHASE_VALUES = {"planning", "execution", "closeout"}
+INLINE_CONTINUE_SIGNALS = {EXECUTION_READY_SIGNAL}
+LOCAL_MICROSTEP_BATCH_SIGNALS = {EXECUTION_READY_SIGNAL}
 WAITING_ON_ASYNC_SIGNALS = {WAITING_ON_ASYNC_SIGNAL, WAITING_ON_LIVE_TASK_SIGNAL}
 PARKED_IDLE_SIGNALS = {PARKED_IDLE_SIGNAL}
 SESSION_PROGRESS_SIGNALS = LOCAL_MICROSTEP_BATCH_SIGNALS | INLINE_CONTINUE_SIGNALS | WAITING_ON_ASYNC_SIGNALS
-TASKBOARD_PROTOCOL_VERSION = "TBP1"
-TASKBOARD_STEP_CLASSES = {"inline_now", "inline_batch", "async_task", "milestone_closeout", "stop"}
 TASKBOARD_LIVE_TASK_STATUS_VALUES = {"none", "submitted", "awaiting"}
-TASKBOARD_FINAL_SIGNAL_VALUES = SESSION_PROGRESS_SIGNALS | PARKED_IDLE_SIGNALS | {
-    "NO_FURTHER_TASKS",
-    "STOP_AUTOMATION",
-    "END_EXPERIMENT",
-    CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL,
+TASKBOARD_PUBLIC_SIGNAL_VALUES = {
+    EXECUTION_READY_SIGNAL,
+    WAITING_ON_ASYNC_SIGNAL,
+    CLOSEOUT_READY_SIGNAL,
     "none",
 }
+TASKBOARD_LEGACY_SIGNAL_VALUES = {
+    LOCAL_CONTINUE_NO_WAKE_SIGNAL,
+    LOCAL_MICROSTEP_BATCH_SIGNAL,
+    MATERIALS_READY_FOR_PROPOSAL_SIGNAL,
+    ANALYZING_NEW_EVIDENCE_SIGNAL,
+    WAITING_ON_LIVE_TASK_SIGNAL,
+    PARKED_IDLE_SIGNAL,
+    "NO_FURTHER_TASKS",
+    "END_EXPERIMENT",
+    "NEW_TASKS_STARTED",
+}
+TASKBOARD_SIGNAL_VALUES = TASKBOARD_PUBLIC_SIGNAL_VALUES | TASKBOARD_LEGACY_SIGNAL_VALUES | SUCCESS_TASKBOARD_SIGNALS | {"STOP_AUTOMATION"}
 CANONICAL_HEAD_CONTRACT_VERSION = "CH1"
 CANONICAL_HEAD_BEGIN_MARKER = "TASKBOARD_CANONICAL_HEAD_BEGIN"
 CANONICAL_HEAD_END_MARKER = "TASKBOARD_CANONICAL_HEAD_END"
 CANONICAL_HEAD_SCAN_CHARS = 8192
 CANONICAL_HEAD_REQUIRED_KEYS = ("BIG_MAINLINE", "SMALL_MAINLINE", "CURRENT_BOUNDARY", "NEXT_STEP")
 CANONICAL_HEAD_OPTIONAL_KEYS = ("KEY_EVIDENCE", "MILESTONE")
-LOCAL_MICROSTEP_BATCH_REASON = "local_microstep_batch"
+LOCAL_MICROSTEP_BATCH_REASON = "execution_reentry"
 WAITING_ON_ASYNC_REASON = "waiting_on_async_watchdog"
 PROTOCOL_SELF_CHECK_REPAIR_REASON = "protocol_self_check_repair"
 PROTOCOL_SELF_CHECK_REPAIR_FOLLOWUP_TYPE = "protocol_self_check_repair"
@@ -615,6 +626,14 @@ DEFAULT_PROTOCOL_REPAIR_MIN_IDLE_SECONDS = 30
 
 LEGACY_TASKBOARD_SIGNAL_ALIASES = {
     WAITING_ON_LIVE_TASK_SIGNAL: WAITING_ON_ASYNC_SIGNAL,
+    ANALYZING_NEW_EVIDENCE_SIGNAL: EXECUTION_READY_SIGNAL,
+    LOCAL_CONTINUE_NO_WAKE_SIGNAL: EXECUTION_READY_SIGNAL,
+    LOCAL_MICROSTEP_BATCH_SIGNAL: EXECUTION_READY_SIGNAL,
+    MATERIALS_READY_FOR_PROPOSAL_SIGNAL: EXECUTION_READY_SIGNAL,
+    "NEW_TASKS_STARTED": EXECUTION_READY_SIGNAL,
+    "NO_FURTHER_TASKS": CLOSEOUT_READY_SIGNAL,
+    "END_EXPERIMENT": CLOSEOUT_READY_SIGNAL,
+    PARKED_IDLE_SIGNAL: "none",
 }
 
 
@@ -623,6 +642,23 @@ def canonicalize_taskboard_signal(signal: str) -> str:
     if not normalized_signal:
         return ""
     return LEGACY_TASKBOARD_SIGNAL_ALIASES.get(normalized_signal, normalized_signal)
+
+
+def infer_taskboard_research_phase(
+    *,
+    explicit_phase: str = "",
+    step_class: str = "",
+    final_signal: str = "",
+) -> str:
+    normalized_phase = str(explicit_phase or "").strip()
+    if normalized_phase in TASKBOARD_RESEARCH_PHASE_VALUES:
+        return normalized_phase
+    normalized_signal = canonicalize_taskboard_signal(final_signal)
+    if normalized_signal == CLOSEOUT_READY_SIGNAL:
+        return "closeout"
+    if normalized_signal == EXECUTION_READY_SIGNAL or normalized_signal == WAITING_ON_ASYNC_SIGNAL:
+        return "execution"
+    return "execution"
 TRAINING_PATTERNS = [
     r"\btorchrun\b",
     r"\bdeepspeed\b",
@@ -2133,9 +2169,8 @@ def proposal_bootstrap_ready_for_session(
 ) -> bool:
     if not bool((next_action_hint or {}).get("proposal_bootstrap", False)):
         return False
-    normalized_wait_state = str(effective_wait_state or session_state.get("waiting_state", "")).strip()
-    last_signal = str(session_state.get("last_signal", "")).strip()
-    return normalized_wait_state in PARKED_IDLE_SIGNALS or last_signal in PARKED_IDLE_SIGNALS
+    normalized_wait_state = canonicalize_taskboard_signal(str(effective_wait_state or session_state.get("waiting_state", "")).strip())
+    return normalized_wait_state not in {WAITING_ON_ASYNC_SIGNAL, WAITING_ON_FEEDBACK_SIGNAL}
 
 
 def proposal_dispatch_ready_for_session(
@@ -2145,6 +2180,30 @@ def proposal_dispatch_ready_for_session(
     if str(session_state.get("last_signal", "")).strip() == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
         return True
     return bool((next_action_hint or {}).get("dispatch_ready", False))
+
+
+def effective_research_phase_for_session(
+    session_state: dict[str, Any],
+    *,
+    next_action_hint: dict[str, Any] | None = None,
+    effective_wait_state: str = "",
+) -> str:
+    stored_phase = str(session_state.get("research_phase", "")).strip()
+    if stored_phase in TASKBOARD_RESEARCH_PHASE_VALUES:
+        return stored_phase
+    normalized_wait_state = canonicalize_taskboard_signal(str(effective_wait_state or session_state.get("waiting_state", "")).strip())
+    if normalized_wait_state == CLOSEOUT_READY_SIGNAL:
+        return "closeout"
+    last_signal = canonicalize_taskboard_signal(str(session_state.get("last_signal", "")).strip())
+    if last_signal == CLOSEOUT_READY_SIGNAL:
+        return "closeout"
+    if proposal_bootstrap_ready_for_session(
+        session_state,
+        next_action_hint or {},
+        effective_wait_state=normalized_wait_state,
+    ):
+        return "planning"
+    return "execution"
 
 
 def proposal_scope_key(*, workdir: str = "", remote_workdir: str = "") -> str:
@@ -2629,7 +2688,7 @@ def compact_proposal_feedback_instruction_lines(spec: dict[str, Any]) -> list[st
         lines.append("authoritative proposal 以上面的 proposal_file 为准。")
         if project_history_file:
             lines.append(
-                "本轮可靠结果、关键诊断结论和 next bounded action 默认写回当前 proposal；如果 route 或 claim boundary 变化，再同步 project_history_file。"
+                "本轮可靠结果、关键诊断结论和 next bounded action 默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。"
             )
         else:
             lines.append("本轮可靠结果、关键诊断结论和 next bounded action 默认写回当前 proposal。")
@@ -2640,6 +2699,28 @@ def compact_proposal_feedback_instruction_lines(spec: dict[str, Any]) -> list[st
 
 def proposal_feedback_instruction_lines(spec: dict[str, Any], *, profile: str = PROMPT_PROFILE_FULL) -> list[str]:
     return compact_proposal_feedback_instruction_lines(spec)
+
+
+def proposal_manual_decision_gate_hints(spec: dict[str, Any], *, max_hints: int = 5) -> list[str]:
+    proposal_path = str(spec.get("proposal_path", "")).strip()
+    if not proposal_path:
+        return []
+    try:
+        text = Path(proposal_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    hints: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if not any(keyword.lower() in lowered for keyword in MANUAL_DECISION_GATE_KEYWORDS):
+            continue
+        hints.append(line[:240])
+        if len(hints) >= max_hints:
+            break
+    return hints
 
 
 def evidence_first_loop_lines(*, compact: bool = True) -> list[str]:
@@ -2661,24 +2742,39 @@ def execution_followthrough_instruction_lines(
         submit_args.append("closeout_proposal_dir")
     if str(spec.get("project_history_file", "")).strip():
         submit_args.append("project_history_file")
-    lines = ["", *prompt_block_lines(
-        "taskboard_ops",
-        local_continue_signal=LOCAL_CONTINUE_NO_WAKE_SIGNAL,
-        local_microstep_signal=LOCAL_MICROSTEP_BATCH_SIGNAL,
-        waiting_signal=WAITING_ON_ASYNC_SIGNAL,
-        parked_signal=PARKED_IDLE_SIGNAL,
-    )]
-    if submit_args:
-        lines.append(
-            "提交新任务时显式传入 " + "、".join(submit_args) + "，并用 `codex-taskboard status --json` 校验 `proposal_path` 与 live 状态。"
-        )
+    lines = ["", "taskboard 使用说明："]
+    lines.append("- 当前上下文里还能做完的 CPU-only 工作，优先继续做完，不要为了 signal 人为拆轮。")
+    submit_line = submit_binding_instruction_line(spec, submit_args=submit_args)
+    if submit_line:
+        lines.append(f"- {submit_line}")
     if allow_no_further_tasks:
-        lines.append("只有确认当前链已经无需再自动推进时，才输出 `TASKBOARD_SIGNAL=NO_FURTHER_TASKS`。")
+        lines.append("- 当前是 managed 模式：taskboard 只托管任务和积压回流，不会自动再把同一对话拆成额外短步骤。")
     else:
         lines.append(
-            f"完成当前 proposal/history 更新并且已经提交至少一条受托管实验后，再输出 `TASKBOARD_SIGNAL={CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL}`。"
+            f"- 如果本轮只剩等待受托管实验回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`；taskboard 会按 1 小时节奏提醒你回来确认实验仍在产出。"
+        )
+        lines.append(
+            f"- 只有在你已经重读 proposal/history 与本轮证据，并且明确写出“继续当前 proposal 已无新的信息收益”的分析后，才允许输出 `TASKBOARD_SIGNAL={CLOSEOUT_READY_SIGNAL}`。"
         )
     return lines
+
+
+def submit_binding_instruction_line(spec: dict[str, Any], *, submit_args: list[str] | None = None) -> str:
+    bound_args = submit_args if submit_args is not None else []
+    if submit_args is None:
+        if str(spec.get("proposal_path", "")).strip():
+            bound_args.append("proposal_file")
+        if str(spec.get("closeout_proposal_dir", "")).strip():
+            bound_args.append("closeout_proposal_dir")
+        if str(spec.get("project_history_file", "")).strip():
+            bound_args.append("project_history_file")
+    if not bound_args:
+        return ""
+    return (
+        "提交新任务时显式传入 "
+        + "、".join(bound_args)
+        + "，并用 `codex-taskboard status --json` 校验 `proposal_path` 与 live 状态。"
+    )
 
 
 def reschedule_existing_followup(
@@ -2760,13 +2856,27 @@ def clear_waiting_state_for_inline_continue(
     return evidence_token
 
 
+def execution_autowake_enabled_for_spec(
+    config: AppConfig,
+    *,
+    spec: dict[str, Any],
+    session_id: str = "",
+) -> bool:
+    normalized_session_id = str(session_id or "").strip() or str(spec.get("codex_session_id", "")).strip()
+    if not normalized_session_id:
+        return False
+    return continuous_research_mode_enabled(config, codex_session_id=normalized_session_id)
+
+
 def schedule_local_microstep_followup(
     config: AppConfig,
     *,
     task_id: str,
     spec: dict[str, Any],
     followup: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
+    if not execution_autowake_enabled_for_spec(config, spec=spec):
+        return False
     if followup is not None and str(followup.get("followup_type", "")).strip() != "queued_feedback_resume":
         keep_followup_type = str(followup.get("followup_type", "")).strip() == CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE
         reschedule_existing_followup(
@@ -2786,7 +2896,7 @@ def schedule_local_microstep_followup(
             followup_last_action=f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}",
             followup_stopped_at="",
         )
-        return
+        return True
     schedule_followup(
         config,
         task_id=task_id,
@@ -2796,6 +2906,7 @@ def schedule_local_microstep_followup(
         interval_seconds=DEFAULT_LOCAL_MICROSTEP_INTERVAL_SECONDS,
         min_idle_seconds=DEFAULT_LOCAL_MICROSTEP_MIN_IDLE_SECONDS,
     )
+    return True
 
 
 def schedule_waiting_on_async_watchdog(
@@ -2804,7 +2915,9 @@ def schedule_waiting_on_async_watchdog(
     task_id: str,
     spec: dict[str, Any],
     followup: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
+    if not execution_autowake_enabled_for_spec(config, spec=spec):
+        return False
     if followup is not None and str(followup.get("followup_type", "")).strip() != "queued_feedback_resume":
         keep_followup_type = str(followup.get("followup_type", "")).strip() == CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE
         reschedule_existing_followup(
@@ -2824,7 +2937,7 @@ def schedule_waiting_on_async_watchdog(
             followup_last_action=f"scheduled:{WAITING_ON_ASYNC_REASON}",
             followup_stopped_at="",
         )
-        return
+        return True
     schedule_followup(
         config,
         task_id=task_id,
@@ -2834,6 +2947,7 @@ def schedule_waiting_on_async_watchdog(
         interval_seconds=DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS,
         min_idle_seconds=DEFAULT_WAITING_ON_ASYNC_MIN_IDLE_SECONDS,
     )
+    return True
 
 
 def schedule_protocol_self_check_repair(
@@ -3356,6 +3470,52 @@ def continuous_research_enabled_session_ids(config: AppConfig) -> list[str]:
     return continuous_research_enabled_session_ids_impl(config, hooks=automation_state_hooks())
 
 
+def automation_mode(config: AppConfig, *, codex_session_id: str = "") -> dict[str, Any]:
+    return automation_mode_impl(config, hooks=automation_state_hooks(), codex_session_id=codex_session_id)
+
+
+def automation_mode_label(config: AppConfig, *, codex_session_id: str = "") -> str:
+    return automation_mode_label_impl(config, hooks=automation_state_hooks(), codex_session_id=codex_session_id)
+
+
+def automation_mode_is_managed(config: AppConfig, *, codex_session_id: str = "") -> bool:
+    return automation_mode_is_managed_impl(config, hooks=automation_state_hooks(), codex_session_id=codex_session_id)
+
+
+def set_automation_mode(
+    config: AppConfig,
+    *,
+    mode: str,
+    codex_session_id: str = "",
+    updated_by: str = "cli",
+    source: str = "",
+) -> dict[str, Any]:
+    return set_automation_mode_impl(
+        config,
+        hooks=automation_state_hooks(),
+        mode=mode,
+        codex_session_id=codex_session_id,
+        updated_by=updated_by,
+        source=source,
+    )
+
+
+def toggle_automation_mode(
+    config: AppConfig,
+    *,
+    codex_session_id: str = "",
+    updated_by: str = "cli",
+    source: str = "",
+) -> dict[str, Any]:
+    return toggle_automation_mode_impl(
+        config,
+        hooks=automation_state_hooks(),
+        codex_session_id=codex_session_id,
+        updated_by=updated_by,
+        source=source,
+    )
+
+
 def human_guidance_mode_path(config: AppConfig) -> Path:
     return human_guidance_mode_path_impl(config, hooks=automation_state_hooks())
 
@@ -3391,7 +3551,7 @@ def set_human_guidance_mode(
     *,
     active: bool,
     codex_session_id: str = "",
-    lease_seconds: int = DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS,
+    lease_seconds: int = DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS,
     reason: str = "",
     updated_by: str = "cli",
     source: str = "",
@@ -3412,7 +3572,7 @@ def toggle_human_guidance_mode(
     config: AppConfig,
     *,
     codex_session_id: str = "",
-    lease_seconds: int = DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS,
+    lease_seconds: int = DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS,
     reason: str = "",
     updated_by: str = "cli",
     source: str = "",
@@ -3475,19 +3635,26 @@ def clear_all_human_guidance_mode(
 
 
 def human_guidance_mode_active(config: AppConfig, *, codex_session_id: str = "") -> bool:
-    return human_guidance_mode_active_impl(config, hooks=automation_state_hooks(), codex_session_id=codex_session_id)
+    return automation_mode_is_managed(config, codex_session_id=codex_session_id)
 
 
 def human_guidance_retry_after_seconds(config: AppConfig, *, codex_session_id: str = "") -> int:
-    return human_guidance_retry_after_seconds_impl(config, hooks=automation_state_hooks(), codex_session_id=codex_session_id)
+    del codex_session_id
+    return DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS
 
 
 def human_guidance_mode_label(config: AppConfig) -> str:
-    return human_guidance_mode_label_impl(config, hooks=automation_state_hooks())
+    return "managed" if automation_mode_label(config) == "managed" else "off"
 
 
 def human_guidance_active_session_ids(config: AppConfig) -> list[str]:
-    return human_guidance_active_session_ids_impl(config, hooks=automation_state_hooks())
+    payload = load_continuous_research_mode(config)
+    sessions = payload.get("sessions", {}) if isinstance(payload.get("sessions", {}), dict) else {}
+    return sorted(
+        session_id
+        for session_id, state in sessions.items()
+        if isinstance(state, dict) and str(state.get("mode", "")).strip() == "managed"
+    )
 
 def normalize_task_id(raw_value: str) -> str:
     value = raw_value.strip().lower()
@@ -4619,7 +4786,7 @@ def session_runtime_hooks() -> SessionRuntimeHooks:
         extract_taskboard_protocol_footer=extract_taskboard_protocol_footer,
         list_proc_entries=lambda: list(Path("/proc").iterdir()),
         now_ts=time.time,
-        taskboard_final_signal_values=set(TASKBOARD_FINAL_SIGNAL_VALUES),
+        taskboard_final_signal_values=set(TASKBOARD_SIGNAL_VALUES),
         rate_limit_patterns=tuple(RATE_LIMIT_PATTERNS),
         session_busy_patterns=tuple(SESSION_BUSY_PATTERNS),
         platform_error_signatures=tuple(PLATFORM_ERROR_SIGNATURES),
@@ -4881,16 +5048,9 @@ def taskboard_light_research_brief_lines(*, continuous_mode: bool) -> list[str]:
 def taskboard_footer_contract_lines() -> list[str]:
     return [
         "回复末尾请单独补一组自检行：",
-        f"TASKBOARD_PROTOCOL_ACK={TASKBOARD_PROTOCOL_VERSION}",
-        "CURRENT_STEP_CLASS=inline_now|inline_batch|async_task|milestone_closeout|stop",
+        f"TASKBOARD_SIGNAL={EXECUTION_READY_SIGNAL}|{WAITING_ON_ASYNC_SIGNAL}|{CLOSEOUT_READY_SIGNAL}|none",
         "TASKBOARD_SELF_CHECK=pass|fail",
         "LIVE_TASK_STATUS=none|submitted|awaiting",
-        (
-            "FINAL_SIGNAL="
-            f"LOCAL_CONTINUE_NO_WAKE|LOCAL_MICROSTEP_BATCH|ANALYZING_NEW_EVIDENCE|MATERIALS_READY_FOR_PROPOSAL|"
-            f"WAITING_ON_ASYNC|PARKED_IDLE|NO_FURTHER_TASKS|STOP_AUTOMATION|END_EXPERIMENT|"
-            f"{CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL}|none"
-        ),
     ]
 
 
@@ -4901,6 +5061,12 @@ def compact_research_governance_header_lines(
 ) -> list[str]:
     lines: list[str] = []
     lines.extend(taskboard_light_research_brief_lines(continuous_mode=continuous_mode))
+    lines.extend(proposal_feedback_instruction_lines(spec, profile=PROMPT_PROFILE_RESUME_COMPACT))
+    return lines
+
+
+def compact_runtime_resume_header_lines(spec: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
     lines.extend(proposal_feedback_instruction_lines(spec, profile=PROMPT_PROFILE_RESUME_COMPACT))
     return lines
 
@@ -5420,6 +5586,96 @@ def queued_notification_entries(followup: dict[str, Any]) -> list[dict[str, Any]
     return queued_notification_entries_impl(followup)
 
 
+def reflow_backlog_entries(
+    config: AppConfig,
+    *,
+    codex_session_id: str = "",
+    followups: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    normalized_session_id = str(codex_session_id or "").strip()
+    backlog: list[dict[str, Any]] = []
+    for followup in followups or load_followups(config):
+        if str(followup.get("followup_type", "")).strip() != "queued_feedback_resume":
+            continue
+        followup_session_id = str(followup.get("codex_session_id", "")).strip() or str(
+            (followup.get("spec_snapshot", {}) if isinstance(followup.get("spec_snapshot", {}), dict) else {}).get("codex_session_id", "")
+        ).strip()
+        if normalized_session_id and followup_session_id != normalized_session_id:
+            continue
+        entries = queued_notification_entries(followup)
+        timestamps = [
+            str(item.get("event_timestamp", "") or item.get("finished_at", "") or item.get("queued_at", "")).strip()
+            for item in entries
+            if isinstance(item, dict)
+        ]
+        timestamps = [item for item in timestamps if item]
+        backlog.append(
+            {
+                "followup_key": str(followup.get("followup_key", "")).strip(),
+                "codex_session_id": followup_session_id,
+                "queue_depth": len(entries),
+                "oldest_event_at": min(timestamps) if timestamps else "",
+                "latest_event_at": max(timestamps) if timestamps else "",
+                "task_ids": followup_task_ids(followup),
+                "entries": entries,
+            }
+        )
+    backlog.sort(key=lambda item: (item.get("codex_session_id", ""), item.get("oldest_event_at", ""), item.get("followup_key", "")))
+    return backlog
+
+
+def reflow_backlog_summary(
+    config: AppConfig,
+    *,
+    codex_session_id: str = "",
+    followups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    entries = reflow_backlog_entries(config, codex_session_id=codex_session_id, followups=followups)
+    queue_depth = sum(int(item.get("queue_depth", 0) or 0) for item in entries)
+    oldest = min((str(item.get("oldest_event_at", "")).strip() for item in entries if str(item.get("oldest_event_at", "")).strip()), default="")
+    latest = max((str(item.get("latest_event_at", "")).strip() for item in entries if str(item.get("latest_event_at", "")).strip()), default="")
+    return {
+        "session_count": len({str(item.get("codex_session_id", "")).strip() for item in entries if str(item.get("codex_session_id", "")).strip()}),
+        "followup_count": len(entries),
+        "queue_depth": queue_depth,
+        "oldest_event_at": oldest,
+        "latest_event_at": latest,
+        "entries": entries,
+    }
+
+
+def clear_reflow_backlog(config: AppConfig, *, codex_session_id: str = "", clear_all: bool = False) -> dict[str, Any]:
+    summaries = reflow_backlog_entries(config, codex_session_id="" if clear_all else codex_session_id)
+    cleared_followups = 0
+    cleared_events = 0
+    cleared_sessions: set[str] = set()
+    for item in summaries:
+        session_id = str(item.get("codex_session_id", "")).strip()
+        if not clear_all and codex_session_id and session_id != str(codex_session_id).strip():
+            continue
+        followup_key = str(item.get("followup_key", "")).strip()
+        if not followup_key:
+            continue
+        for task_id in item.get("task_ids", []):
+            merge_task_state(
+                config,
+                str(task_id),
+                pending_feedback=False,
+                followup_status="resolved",
+                followup_last_action="backlog_cleared_manually",
+                followup_stopped_at=utc_now(),
+            )
+        resolve_followup(config, followup_key)
+        cleared_followups += 1
+        cleared_events += int(item.get("queue_depth", 0) or 0)
+        if session_id:
+            cleared_sessions.add(session_id)
+    return {
+        "cleared_followups": cleared_followups,
+        "cleared_events": cleared_events,
+        "cleared_sessions": sorted(cleared_sessions),
+    }
+
 
 def followup_task_ids(followup: dict[str, Any]) -> list[str]:
     return followup_task_ids_impl(followup, hooks=followup_runtime_hooks())
@@ -5638,21 +5894,18 @@ def maybe_park_continuous_idle_loop(
         "next_action_source_updated_at": str(next_action_hint.get("source_updated_at", "")),
     }
     if signal_value in PARKED_IDLE_SIGNALS:
-        repeat_count = next_parked_idle_repeat_count(session_state, evidence_token=evidence_token)
-        park_continuous_research_session(
+        clear_continuous_research_session_waiting_state(
             config,
             codex_session_id=session_id,
-            waiting_state=signal_value,
-            waiting_reason="agent_requested_parked_idle",
             evidence_token=evidence_token,
-            last_signal=signal_value,
-            stable_idle_repeat_count=repeat_count,
+            last_signal=EXECUTION_READY_SIGNAL,
+            stable_idle_repeat_count=max(1, previous_count),
             updated_by="followup",
-            source="continuous-idle-loop",
-            next_action_repeat_count=max(repeat_count, previous_next_action_repeat_count),
+            source="continuous-idle-loop-ignore-legacy-parked",
+            next_action_repeat_count=max(1, previous_next_action_repeat_count),
             **next_action_updates,
         )
-        return True, evidence_token, repeat_count
+        return False, evidence_token, max(1, previous_count)
     if signal_value not in LOCAL_MICROSTEP_BATCH_SIGNALS:
         clear_continuous_research_session_waiting_state(
             config,
@@ -5671,24 +5924,6 @@ def maybe_park_continuous_idle_loop(
         return False, evidence_token, 0
     if bool(next_action_hint.get("controller_inherit_local", False)) and next_action_hash:
         repeat_count = previous_next_action_repeat_count + 1 if next_action_hash == previous_next_action_hash else 1
-        if (
-            next_action_hash == previous_next_action_hash
-            and repeat_count >= CONTINUOUS_RESEARCH_LOCAL_FASTPATH_REPEAT_THRESHOLD
-        ):
-            park_continuous_research_session(
-                config,
-                codex_session_id=session_id,
-                waiting_state=PARKED_IDLE_SIGNAL,
-                waiting_reason="repeated_local_action_without_new_evidence",
-                evidence_token=evidence_token,
-                last_signal=signal_value,
-                stable_idle_repeat_count=repeat_count,
-                updated_by="followup",
-                source="continuous-idle-loop",
-                next_action_repeat_count=repeat_count,
-                **next_action_updates,
-            )
-            return True, evidence_token, repeat_count
         clear_continuous_research_session_waiting_state(
             config,
             codex_session_id=session_id,
@@ -5702,21 +5937,6 @@ def maybe_park_continuous_idle_loop(
         )
         return False, evidence_token, repeat_count
     repeat_count = previous_count + 1 if evidence_token and previous_token == evidence_token else 1
-    if evidence_token and previous_token == evidence_token and repeat_count >= CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD:
-        park_continuous_research_session(
-            config,
-            codex_session_id=session_id,
-            waiting_state=PARKED_IDLE_SIGNAL,
-            waiting_reason="repeated_idle_without_new_evidence",
-            evidence_token=evidence_token,
-            last_signal=signal_value,
-            stable_idle_repeat_count=repeat_count,
-            updated_by="followup",
-            source="continuous-idle-loop",
-            next_action_repeat_count=0,
-            **next_action_updates,
-        )
-        return True, evidence_token, repeat_count
     clear_continuous_research_session_waiting_state(
         config,
         codex_session_id=session_id,
@@ -5873,17 +6093,17 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
             processed.append({"followup_key": followup_key, "action": "rebound_session_binding"})
         return processed
     min_idle_seconds = int(followup.get("min_idle_seconds", 600))
-    if session_id and human_guidance_mode_active(config, codex_session_id=session_id):
+    if session_id and automation_mode_is_managed(config, codex_session_id=session_id):
         defer_followup_retry(
             config,
             followup,
-            reason="human_guidance_pause",
-            retry_after_seconds=human_guidance_retry_after_seconds(config, codex_session_id=session_id),
+            reason="managed_mode_pause",
+            retry_after_seconds=DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS,
             message_path=str(followup_message_path(config, followup_key)),
         )
         for task_id in followup_task_ids(followup):
-            merge_task_state(config, task_id, session_flow_state="human_guidance_paused")
-        processed.append({"followup_key": followup_key, "action": "deferred_human_guidance_pause"})
+            merge_task_state(config, task_id, session_flow_state="managed_backlog")
+        processed.append({"followup_key": followup_key, "action": "deferred_managed_mode_pause"})
         return processed
     if is_continuous_followup and session_id and session_has_live_task(config, session_id):
         refresh_continuous_session_for_live_tasks(
@@ -6646,6 +6866,7 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                     merge_task_state(
                         config,
                         queued_task_id,
+                        research_phase="closeout",
                         pending_feedback=False,
                         notification_ok=result.get("ok", False),
                         notification_signal=signal_value,
@@ -6654,6 +6875,7 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                         notification_finished_at=result.get("finished_at"),
                         notification_summary={
                             "ok": result.get("ok", False),
+                            "research_phase": "closeout",
                             "taskboard_signal": signal_value,
                             "session_flow_state": "proposal_materialization",
                         },
@@ -6674,6 +6896,7 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                     merge_task_state(
                         config,
                         task_id,
+                        research_phase="closeout",
                         session_flow_state="proposal_materialization",
                         notification_signal=signal_value,
                         followup_status="scheduled",
@@ -6704,6 +6927,7 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                 merge_task_state(
                     config,
                     task_id,
+                    research_phase="closeout",
                     session_flow_state="proposal_materialization",
                     notification_signal=signal_value,
                     followup_status="scheduled",
@@ -6764,24 +6988,37 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                     followup_last_action="queued_feedback_delivered_local_microstep",
                     followup_last_message_path=str(msg_path),
                 )
+            local_followup_scheduled = False
             if task_id and should_schedule_followup_for_spec(spec_for_resume):
-                schedule_local_microstep_followup(config, task_id=task_id, spec=spec_for_resume)
+                local_followup_scheduled = schedule_local_microstep_followup(
+                    config,
+                    task_id=task_id,
+                    spec=spec_for_resume,
+                )
                 merge_task_state(
                     config,
                     task_id,
                     session_flow_state="local_active",
                     notification_signal=signal_value,
-                    followup_status="scheduled",
+                    followup_status="scheduled" if local_followup_scheduled else "resolved",
                     followup_last_signal=signal_value,
-                    followup_last_action=f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}",
-                    followup_stopped_at="",
+                    followup_last_action=(
+                        f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}"
+                        if local_followup_scheduled
+                        else "queued_feedback_delivered_local_microstep_no_autowake"
+                    ),
+                    followup_stopped_at="" if local_followup_scheduled else utc_now(),
                     followup_last_message_path=str(msg_path),
                 )
             resolve_followup(config, followup_key)
             processed.append(
                 {
                     "followup_key": followup_key,
-                    "action": "queued_feedback_delivered_local_microstep",
+                    "action": (
+                        "queued_feedback_delivered_local_microstep"
+                        if local_followup_scheduled
+                        else "queued_feedback_delivered_local_microstep_no_autowake"
+                    ),
                     "queue_depth": entry_count,
                     "signal": signal_value,
                 }
@@ -6827,8 +7064,45 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                 }
             )
             return processed
+        local_followup_scheduled = False
         if task_id:
-            schedule_local_microstep_followup(config, task_id=task_id, spec=spec_for_resume, followup=followup)
+            local_followup_scheduled = schedule_local_microstep_followup(
+                config,
+                task_id=task_id,
+                spec=spec_for_resume,
+                followup=followup,
+            )
+        if not local_followup_scheduled:
+            sync_followup_state(
+                config,
+                followup,
+                followup_status="resolved",
+                followup_last_action="resolved_local_microstep_without_continuous",
+                followup_last_signal=signal_value,
+                notification_signal=signal_value,
+                message_path=str(msg_path),
+            )
+            resolve_followup(config, followup_key)
+            if task_id:
+                merge_task_state(
+                    config,
+                    task_id,
+                    session_flow_state="local_active",
+                    followup_status="resolved",
+                    followup_last_signal=signal_value,
+                    followup_last_action="resolved_local_microstep_without_continuous",
+                    followup_last_message_path=str(msg_path),
+                    notification_signal=signal_value,
+                )
+            processed.append(
+                {
+                    "followup_key": followup_key,
+                    "action": "resolved_local_microstep_without_continuous",
+                    "signal": signal_value,
+                }
+            )
+            return processed
+        if task_id:
             merge_task_state(
                 config,
                 task_id,
@@ -6969,17 +7243,26 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                     followup_last_message_path=str(msg_path),
                 )
             resolve_followup(config, followup_key)
+            waiting_followup_scheduled = False
             if not newer_async_task_exists and not live_task_present and task_id and should_schedule_followup_for_spec(spec_for_resume):
-                schedule_waiting_on_async_watchdog(config, task_id=task_id, spec=spec_for_resume)
+                waiting_followup_scheduled = schedule_waiting_on_async_watchdog(
+                    config,
+                    task_id=task_id,
+                    spec=spec_for_resume,
+                )
                 merge_task_state(
                     config,
                     task_id,
                     session_flow_state="awaiting_async",
                     notification_signal=signal_value,
-                    followup_status="scheduled",
+                    followup_status="scheduled" if waiting_followup_scheduled else "resolved",
                     followup_last_signal=signal_value,
-                    followup_last_action=f"scheduled:{WAITING_ON_ASYNC_REASON}",
-                    followup_stopped_at="",
+                    followup_last_action=(
+                        f"scheduled:{WAITING_ON_ASYNC_REASON}"
+                        if waiting_followup_scheduled
+                        else "queued_feedback_delivered_waiting_on_async_no_autowake"
+                    ),
+                    followup_stopped_at="" if waiting_followup_scheduled else utc_now(),
                     followup_last_message_path=str(msg_path),
                 )
             processed.append(
@@ -6991,7 +7274,11 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                         else (
                             "queued_feedback_waiting_on_async_live_task"
                             if live_task_present
-                            else "queued_feedback_waiting_on_async_watchdog_scheduled"
+                            else (
+                                "queued_feedback_waiting_on_async_watchdog_scheduled"
+                                if waiting_followup_scheduled
+                                else "queued_feedback_waiting_on_async_without_watchdog"
+                            )
                         )
                     ),
                     "queue_depth": entry_count,
@@ -7077,8 +7364,45 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                 updated_by="followup",
                 source="followup-waiting-on-async",
             )
+        waiting_followup_scheduled = False
         if task_id:
-            schedule_waiting_on_async_watchdog(config, task_id=task_id, spec=spec_for_resume, followup=followup)
+            waiting_followup_scheduled = schedule_waiting_on_async_watchdog(
+                config,
+                task_id=task_id,
+                spec=spec_for_resume,
+                followup=followup,
+            )
+        if not waiting_followup_scheduled:
+            sync_followup_state(
+                config,
+                followup,
+                followup_status="resolved",
+                followup_last_action="resolved_waiting_on_async_without_continuous",
+                followup_last_signal=signal_value,
+                notification_signal=signal_value,
+                message_path=str(msg_path),
+            )
+            resolve_followup(config, followup_key)
+            if task_id:
+                merge_task_state(
+                    config,
+                    task_id,
+                    session_flow_state="awaiting_async",
+                    followup_status="resolved",
+                    followup_last_signal=signal_value,
+                    followup_last_action="resolved_waiting_on_async_without_continuous",
+                    followup_last_message_path=str(msg_path),
+                    notification_signal=signal_value,
+                )
+            processed.append(
+                {
+                    "followup_key": followup_key,
+                    "action": "resolved_waiting_on_async_without_continuous",
+                    "signal": signal_value,
+                }
+            )
+            return processed
+        if task_id:
             merge_task_state(
                 config,
                 task_id,
@@ -8347,50 +8671,40 @@ def parse_key_value_lines(text: str) -> dict[str, Any]:
 
 def extract_taskboard_protocol_footer(text: str) -> dict[str, Any]:
     payload = parse_key_value_lines(text or "")
-    ack = str(payload.get("TASKBOARD_PROTOCOL_ACK", "")).strip()
-    step_class = str(payload.get("CURRENT_STEP_CLASS", "")).strip()
+    signal_value = canonicalize_taskboard_signal(str(payload.get("TASKBOARD_SIGNAL", "")).strip())
     self_check = str(payload.get("TASKBOARD_SELF_CHECK", "")).strip()
     live_task_status = str(payload.get("LIVE_TASK_STATUS", "")).strip()
-    final_signal = str(payload.get("FINAL_SIGNAL", "")).strip()
+    effective_research_phase = infer_taskboard_research_phase(final_signal=signal_value)
     valid = bool(
-        ack == TASKBOARD_PROTOCOL_VERSION
-        and step_class in TASKBOARD_STEP_CLASSES
+        signal_value in TASKBOARD_PUBLIC_SIGNAL_VALUES
         and self_check in {"pass", "fail"}
         and live_task_status in TASKBOARD_LIVE_TASK_STATUS_VALUES
-        and final_signal in TASKBOARD_FINAL_SIGNAL_VALUES
     )
     return {
-        "ack": ack,
-        "step_class": step_class,
+        "effective_research_phase": effective_research_phase,
         "self_check": self_check,
         "live_task_status": live_task_status,
-        "final_signal": final_signal,
+        "signal": signal_value,
         "valid": valid,
     }
 
 
 def summarize_taskboard_protocol_issue(protocol: dict[str, Any] | None, *, signal_value: str = "") -> str:
     payload = protocol if isinstance(protocol, dict) else {}
-    ack = str(payload.get("ack", "")).strip()
-    step_class = str(payload.get("step_class", "")).strip()
     self_check = str(payload.get("self_check", "")).strip()
     live_task_status = str(payload.get("live_task_status", "")).strip()
-    final_signal = str(payload.get("final_signal", "")).strip()
+    footer_signal = canonicalize_taskboard_signal(str(payload.get("signal", "")).strip())
     issues: list[str] = []
-    if ack != TASKBOARD_PROTOCOL_VERSION:
-        issues.append("missing_or_wrong_ack")
-    if step_class not in TASKBOARD_STEP_CLASSES:
-        issues.append("missing_or_wrong_step_class")
+    if footer_signal not in TASKBOARD_PUBLIC_SIGNAL_VALUES:
+        issues.append("missing_or_wrong_signal")
     if self_check not in {"pass", "fail"}:
         issues.append("missing_or_wrong_self_check")
     elif self_check == "fail":
         issues.append("self_check_fail")
     if live_task_status not in TASKBOARD_LIVE_TASK_STATUS_VALUES:
         issues.append("missing_or_wrong_live_task_status")
-    if final_signal not in TASKBOARD_FINAL_SIGNAL_VALUES:
-        issues.append("missing_or_wrong_final_signal")
-    if signal_value and final_signal and final_signal not in {signal_value, "none"}:
-        issues.append(f"signal_mismatch:{final_signal}->{signal_value}")
+    if signal_value and footer_signal and footer_signal not in {canonicalize_taskboard_signal(signal_value), "none"}:
+        issues.append(f"signal_mismatch:{footer_signal}->{canonicalize_taskboard_signal(signal_value)}")
     return ",".join(issues or ["missing_protocol_footer"])
 
 
@@ -8406,11 +8720,10 @@ def taskboard_protocol_requires_repair(protocol: dict[str, Any] | None, *, signa
 def protocol_footer_snapshot(protocol: dict[str, Any] | None) -> dict[str, Any]:
     payload = protocol if isinstance(protocol, dict) else {}
     return {
-        "ack": str(payload.get("ack", "")).strip(),
-        "step_class": str(payload.get("step_class", "")).strip(),
+        "effective_research_phase": str(payload.get("effective_research_phase", "")).strip(),
+        "signal": str(payload.get("signal", "")).strip(),
         "self_check": str(payload.get("self_check", "")).strip(),
         "live_task_status": str(payload.get("live_task_status", "")).strip(),
-        "final_signal": str(payload.get("final_signal", "")).strip(),
         "valid": bool(payload.get("valid", False)),
     }
 
@@ -8503,13 +8816,13 @@ def extract_failure_excerpt(log_text: str, *, status: str, failure_kind: str) ->
 def build_default_resume_instruction(status: str) -> str:
     if status == "completed":
         return (
-            "请检查这次已完成运行的真实工件，判断它对当前 proposal、claim boundary 和下一步路由的影响。"
-            "如果当前最优动作是不应继续扩实验，也请把原因、边界与下一方向写回 proposal。"
+            "请检查这次已完成运行的真实工件，判断它怎样改变了当前 proposal 的结论边界、下一步实验方向和优先级。"
+            "如果现在更适合收紧路线或准备收口，也请把原因和边界明确写回 proposal。"
         )
     if status == "terminated":
         return (
-            "请把这次任务视为中断运行，先判断它为什么停止，以及这到底是执行问题还是路线问题。"
-            "如果当前最优动作是不应继续扩实验，也请把原因、边界与下一方向写回 proposal。"
+            "请把这次任务视为一次中断运行，先判断它为什么停下，以及这到底是执行问题还是研究路线问题。"
+            "如果当前方向需要收紧或改写，也请把原因、边界与替代动作写回 proposal。"
         )
     if status == "observed_exit":
         return (
@@ -8521,20 +8834,22 @@ def build_default_resume_instruction(status: str) -> str:
             "后台任务没有成功启动。请先诊断启动器或提交流水线的问题，并检查是否存在应清理或改派的无效排队项。"
         )
     return (
-        "请把这次任务视为失败运行，检查 traceback 或最后日志，判断这是偶发执行失败还是说明当前路线应收紧或切换。"
+        "请把这次任务视为一次失败运行，检查 traceback 或最后日志，判断这是偶发执行失败，还是说明当前路线需要收紧或切换。"
         "如果当前路线不值得继续，也请把失败原因、边界与替代方向写回 proposal。"
     )
 
 
 def build_standard_followup_prompt(spec: dict[str, Any], *, continuous_research_enabled: bool) -> str:
+    if continuous_research_enabled:
+        return build_continuous_research_prompt(spec)
     prompt_lines = compact_research_governance_header_lines(
         spec,
-        continuous_mode=continuous_research_enabled,
+        continuous_mode=False,
     )
     prompt_lines.extend(
         [
             "",
-            "后台提醒：如果本轮有新的 receipt / summary / report / log / artifact，先读取并吸收，再决定下一步。",
+            "这是一次 managed 模式的跟进提示。默认目标是把新增结果并回当前主线，继续推进当前上下文里能做完的工作；managed 只托管任务和 backlog，不会自动再把这段对话拆成额外短步骤。",
         ]
     )
     prompt_lines.extend(runtime_canonical_head_prompt_lines(spec))
@@ -8542,10 +8857,12 @@ def build_standard_followup_prompt(spec: dict[str, Any], *, continuous_research_
     if next_action_lines:
         prompt_lines.append("")
         prompt_lines.extend(next_action_lines)
+    prompt_lines.extend(["", *evidence_first_loop_lines()])
+    prompt_lines.extend(unified_execution_closure_lines())
     prompt_lines.extend(
         execution_followthrough_instruction_lines(
             spec,
-            allow_no_further_tasks=not continuous_research_enabled,
+            allow_no_further_tasks=True,
             profile=PROMPT_PROFILE_RESUME_COMPACT,
         )
     )
@@ -8553,173 +8870,82 @@ def build_standard_followup_prompt(spec: dict[str, Any], *, continuous_research_
     return join_prompt_lines(prompt_lines)
 
 
-def proposal_manual_decision_gate_hints(spec: dict[str, Any], *, max_matches: int = 5) -> list[str]:
-    proposal_path = str(spec.get("proposal_path", "")).strip()
-    if not proposal_path:
-        return []
-    try:
-        proposal_text = Path(proposal_path).expanduser().read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return []
-    tail = proposal_text[-MAX_PROPOSAL_GATE_SCAN_CHARS:]
-    matches: list[str] = []
-    seen: set[str] = set()
-    for raw_line in tail.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        lowered = line.lower()
-        if not any(keyword in lowered or keyword in line for keyword in MANUAL_DECISION_GATE_KEYWORDS):
-            continue
-        if line in seen:
-            continue
-        seen.add(line)
-        matches.append(line)
-        if len(matches) >= max_matches:
-            break
-    return matches
+def unified_execution_closure_lines() -> list[str]:
+    return [
+        "",
+        "这一轮默认使用统一 execution 上下文：receipt 吸收、代码和数据审计、局部修复、proposal/history 滚动写回、实验包准备与提交尽量在同一轮完成。",
+        "本轮决策顺序：",
+        "1. 先吸收 receipt / summary / report / log / artifact，提炼关键数字、异常点和它们意味着什么。",
+        "2. 只要结果、日志、参数、样本数、吞吐或显存异常，或者和 history、文献、官方推荐参数冲突，就先审代码、数据、配置、split 与运行完整性。",
+        "3. 当前上下文里能完成的局部修复、数据处理、smoke 前置和实验包补齐，直接在这一轮做完。",
+        "4. 把可靠结论、失败边界、关键诊断与 next bounded action 及时写回 proposal/history，写得让三天后的你和下一位 agent 都能看懂。",
+        "5. 只有当实验包已经可执行、可审计，而且确实需要 GPU / remote / 长等待时，才提交 taskboard 任务。",
+    ]
 
 
-def build_parked_watchdog_prompt(spec: dict[str, Any], *, trigger_signal: str) -> str:
-    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
-    lines.extend(
-        [
-            "",
-            f"后台提醒：上一轮信号是 TASKBOARD_SIGNAL={trigger_signal}；这是 parked watchdog，不代表 evidence 已变化。",
-            "先重读最近时间日志、summary、report 与 artifact，判断是否还有 bounded local action；waiting/parked 只是兜底状态，不是默认主动作。",
-        ]
-    )
-    lines.extend(runtime_canonical_head_prompt_lines(spec))
-    lines.append("")
-    lines.extend(recent_project_history_next_action_prompt_lines(spec))
-    lines.extend(
-        [
-            "",
-            "本轮最小闭环：",
-            "1. 如果还有同上下文 CPU-only 数据处理、审计、写回或小修复，就直接在当前 proposal/history 中完成，不要新建同义 proposal。",
-            f"2. 如果 successor 材料已齐，改用 `TASKBOARD_SIGNAL={MATERIALS_READY_FOR_PROPOSAL_SIGNAL}`；如果实验包已经可执行，就直接提交真实验证，不要继续 parked。",
-            f"3. 只有当本地动作确实做完、没有新 evidence、也没有 live task 时，才继续 `TASKBOARD_SIGNAL={PARKED_IDLE_SIGNAL}`。",
-        ]
-    )
-    lines.extend(
-        execution_followthrough_instruction_lines(
-            spec,
-            allow_no_further_tasks=False,
-            profile=PROMPT_PROFILE_RESUME_COMPACT,
-        )
-    )
-    lines.extend(["", *taskboard_footer_contract_lines()])
-    return join_prompt_lines(lines)
-
-
-def build_materials_ready_for_proposal_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
-    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
-    lines.extend(
-        [
-            "",
-            f"后台提醒：上一轮信号是 TASKBOARD_SIGNAL={trigger_signal or MATERIALS_READY_FOR_PROPOSAL_SIGNAL}；这表示你已经完成了 successor hypothesis / proposal 的理论与实验前置材料整理。",
-            "本轮不要重新做 parked 复核；先固化 proposal/history，再判断下一 bounded action 是少量 same-context 收尾还是立即绑定真实实验。",
-        ]
-    )
-    lines.extend(runtime_canonical_head_prompt_lines(spec))
-    lines.append("")
-    lines.extend(recent_project_history_next_action_prompt_lines(spec))
-    lines.extend(
-        [
-            "",
-            "请按下面顺序执行：",
-            "1. 先把 hypothesis packet、claim boundary、代码审计结论和 next bounded action 固化进 proposal/history。",
-            "2. 如果还有少量 same-context CPU-only 准备项，就在当前对话补齐，但目标是尽快形成可运行实验，而不是继续扩写同义文档。",
-            "3. 只要 proposal 已成型且实验包已经可执行，就优先绑定并提交首个真实验证实验；如果仍不能提交，必须把阻塞项和补齐动作写清。",
-            f"4. 只有 proposal 已写好且至少一条真实验证实验或受托管任务已提交后，才输出 `TASKBOARD_SIGNAL={CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL}`。",
-        ]
-    )
-    lines.extend(
-        execution_followthrough_instruction_lines(
-            spec,
-            allow_no_further_tasks=False,
-            profile=PROMPT_PROFILE_RESUME_COMPACT,
-        )
-    )
-    lines.extend(["", *taskboard_footer_contract_lines()])
-    return join_prompt_lines(lines)
-
-
-def build_continuous_research_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
-    manual_gate_hints = proposal_manual_decision_gate_hints(spec)
-    normalized_trigger_signal = str(trigger_signal or "").strip()
-    if normalized_trigger_signal in PARKED_IDLE_SIGNALS:
-        return build_parked_watchdog_prompt(spec, trigger_signal=normalized_trigger_signal)
-    if normalized_trigger_signal == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
-        return build_materials_ready_for_proposal_prompt(spec, trigger_signal=normalized_trigger_signal)
-    elif normalized_trigger_signal:
-        lines = compact_research_governance_header_lines(spec, continuous_mode=True)
-        lines.extend(
-            [
-                "",
-                f"后台提醒：上一轮信号是 TASKBOARD_SIGNAL={normalized_trigger_signal}；continuous mode 优先延续当前长上下文，把还能直接完成并吸收的动作继续做完。",
-            ]
-        )
-    else:
-        lines = compact_research_governance_header_lines(spec, continuous_mode=True)
-        lines.extend(
-            [
-                "",
-                "后台提醒：当前 continuous mode 正在做一次延迟跟进；优先延续当前长上下文，把还能在本轮吸收的动作直接做完。",
-            ]
-        )
-    lines.extend(runtime_canonical_head_prompt_lines(spec))
-    lines.append("")
-    lines.extend(recent_project_history_next_action_prompt_lines(spec))
+def build_unified_execution_prompt(
+    spec: dict[str, Any],
+    *,
+    trigger_signal: str = "",
+    parked_origin: bool = False,
+) -> str:
+    del parked_origin
+    normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
     next_action_hint = controller_continuation_hint_from_spec(spec)
+    manual_gate_hints = proposal_manual_decision_gate_hints(spec)
+    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
+    lines.extend(
+        [
+            "",
+            *prompt_block_lines("execution_scene_intro"),
+            "没有人工干预时，你需要比较几条备选路径，主动选择当前信息增益最高的一步，并说明为什么这样选。",
+            (
+                f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
+                if normalized_trigger_signal
+                else "这是一次 continuous execution 跟进；优先把当前上下文里还能直接完成的分析、审计、修复和写回继续做深。"
+            ),
+        ]
+    )
+    lines.extend(runtime_canonical_head_prompt_lines(spec))
+    next_action_lines = recent_project_history_next_action_prompt_lines(spec)
+    if next_action_lines:
+        lines.append("")
+        lines.extend(next_action_lines)
     if bool(next_action_hint.get("dispatch_ready", False)):
         lines.extend(
             [
                 "",
-                "controller 额外判断：最近时间日志已经把当前动作推进到“CPU-only 材料已齐，需要明确判断是否真的进入 taskboard 生命周期”的 dispatch 阶段。",
-                f"- dispatch_ready_reason: {next_action_hint.get('dispatch_ready_reason', '')}",
-                "这时不要再回退成 parked；先完成 proposal/history 写回，再判断下一 bounded action 是否已经具备实验可执行性。只要实验包已形成，就直接 submit 并校验 proposal_path 与 live 状态。",
+                "taskboard 读到的当前重点：实验包已经接近可提交状态。不要把还差一点点的本地准备项写成 blocker；先补齐，再判断是否该正式提交。",
+                f"- 线索: {next_action_hint.get('dispatch_ready_reason', '')}",
             ]
         )
     if bool(next_action_hint.get("direct_local_artifact", False)):
         lines.extend(
             [
                 "",
-                "controller 额外判断：最近时间日志已经把当前唯一下一跳写成了 launch spec / runner spec / config materialization 一类当前回合可完成的本地工件。",
-                f"- direct_local_artifact_reason: {next_action_hint.get('direct_local_artifact_reason', '')}",
-                "这类动作本轮默认直接落成脚本、配置、spec 或局部文档改写，不要只复述动作名后就结束当前唤起。",
-                (
-                    "如果你还没有真正把这个工件物化出来，请不要仅返回 "
-                    f"`TASKBOARD_SIGNAL={LOCAL_CONTINUE_NO_WAKE_SIGNAL}` 或 `TASKBOARD_SIGNAL={LOCAL_MICROSTEP_BATCH_SIGNAL}`。"
-                ),
+                "taskboard 读到的当前重点：下一步更像是本地配置、runner 或实验包落盘。请直接把这些工件写出来，不要只复述动作名。",
+                f"- 线索: {next_action_hint.get('direct_local_artifact_reason', '')}",
             ]
         )
     if bool(next_action_hint.get("collect_local_evidence", False)):
         lines.extend(
             [
                 "",
-                "controller 额外判断：当前 session 还有最近一条 receipt / artifact 尚未被时间日志或 proposal 吸收。",
-                f"- collect_local_evidence_reason: {next_action_hint.get('collect_local_evidence_reason', '')}",
-                "本轮默认先完成本地 evidence sweep：读取反馈数据、关键日志和 artifact，再把 delta / why / claim boundary 写回当前链路，而不是直接 parked。",
+                "taskboard 读到的当前重点：最近还有结果文件或回流摘要没有被 proposal/history 吸收。请先把这批证据并回主线，再决定下一步。",
+                f"- 线索: {next_action_hint.get('collect_local_evidence_reason', '')}",
             ]
         )
     if manual_gate_hints:
         lines.extend(
             [
                 "",
-                "检测到当前绑定 proposal 中可能存在人工决策门或手动 handoff。",
-                "在 continuous mode 下，不要仅因为这里写了 manual / handoff / 等待解释 就直接停住。",
-                "请先回顾之前日志，以及与当前人工决策门最相关的 proposal 段落、summary、report、handoff packet，再做一次数据分析和发散性思考。",
-                "然后请显式给出对 taskboard 的回应：",
-                "1. 判断这是不是高风险 gate，还是只是历史上遗留的人工作业点。",
-                "2. 如果出现 owner budget commit / budget approval 一类字样，不要默认把它视为硬阻塞；对于普通训练，请先完成训练计划与代码审查，并在本机优先评估是否应直接按 4 卡发车；若判断合理必要，就把结论写回 proposal 并直接自主发车。",
-                "3. 如果不是高风险 gate，请你自行决定如何修改 proposal、claim boundary 和下一步路由，并继续推进后续实验。",
-                "4. 如果仍然必须人工确认，请把等待的具体 decision、可选分支、默认建议、预算影响与阻塞原因写清，不要只写“等待人工”。",
-                "5. 无论最终选择 defer、archive 还是 continue，都要把理由写回 proposal；若当前可继续，请直接分发后续任务。",
+                "proposal 里看起来出现了人工确认点。不要因为看到 manual / handoff 字样就立刻停住；先核对相关证据、日志和 proposal 段落，再判断它是不是硬阻塞。",
+                "如果最终仍必须人工确认，请把等待的具体决定、默认建议、预算影响和阻塞原因写清楚。",
                 "proposal 中检测到的相关片段：",
             ]
         )
         lines.extend([f"- {hint}" for hint in manual_gate_hints])
+    lines.extend(unified_execution_closure_lines())
     lines.extend(
         execution_followthrough_instruction_lines(
             spec,
@@ -8731,40 +8957,116 @@ def build_continuous_research_prompt(spec: dict[str, Any], *, trigger_signal: st
     return join_prompt_lines(lines)
 
 
-def build_continuous_transition_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
-    normalized_trigger_signal = str(trigger_signal or "").strip()
-    if normalized_trigger_signal == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
-        return build_materials_ready_for_proposal_prompt(spec, trigger_signal=normalized_trigger_signal)
+def build_parked_watchdog_prompt(spec: dict[str, Any], *, trigger_signal: str) -> str:
+    return build_unified_execution_prompt(spec, trigger_signal=trigger_signal)
+
+
+def build_continuous_planning_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
+    normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
     lines = compact_research_governance_header_lines(spec, continuous_mode=True)
     lines.extend(
         [
             "",
-            "continuous 收口转场提醒：当前 proposal 已经给出了阶段收口或自动终结判断，但 continuous mode 还没有结束。",
-            "此时目标不是停住，而是完成从“当前 proposal 收口”到“下一阶段 proposal 启动”的科研转场。",
-            "这里的重点是先用最小 writeback 吸收证据、澄清边界；若当前 proposal/history/时间日志已足够承载收口，就不要再新建同义 closeout 文档，并尽快切到下一阶段 proposal 与首个可执行实验。",
+            *prompt_block_lines("planning_scene_intro"),
+            "没有人工干预时，你需要把 predecessor 证据、history、handoff 与必要文献放在一起比较，再主动形成当前最优 proposal，并说明为什么这样选。",
+            (
+                f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
+                if normalized_trigger_signal
+                else "当前要把精力放在刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+            ),
+            "planning 完成标准不是写完一份空文档，而是形成一份可执行、可审计、可分发的 proposal。",
         ]
     )
-    if normalized_trigger_signal:
-        lines.append(f"上一轮 machine-readable signal: TASKBOARD_SIGNAL={normalized_trigger_signal}")
-    lines.append("")
     lines.extend(runtime_canonical_head_prompt_lines(spec))
+    next_action_lines = recent_project_history_next_action_prompt_lines(spec)
+    if next_action_lines:
+        lines.append("")
+        lines.extend(next_action_lines)
     lines.extend(
         [
             "",
-            "请按下面顺序完成，不要等待人工：",
-            "1. 先完成最小必要的 writeback：把当前 proposal 的关键结论、失败边界、风险与收口理由写进 proposal/history；若现有文档足够承载收口，就不要新建同义 closeout。",
-            "2. 若仍有关键结果可疑、边界不稳、代码实现或原始数据未核对，请继续做本地审计后再写结论。",
-            "3. 在最小必要收口后，基于当前证据写出下一阶段 proposal，并把它绑定到 taskboard；这份 proposal 需要明确阶段目标、实验包、决策分支、实现要点、验证指标与停止条件。",
-            f"4. 只有当新 proposal 已形成且至少一条真实验证实验或受托管任务已提交后，再输出 `TASKBOARD_SIGNAL={CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL}`；否则继续留在当前上下文补齐实验前置。",
+            "本轮决策顺序：",
+            "1. 先把上一阶段留下的结果、失败边界、未解问题和必须继承的文件整理成当前 planning 的输入；如果主线真的进入新的方法方向，就补读最关键的旧文献与近年的代表性新工作。",
+            "2. 写或刷新当前 proposal：明确 benchmark/数据集、比较对象、核心假设、实验设计、实现要点、验证指标、停止条件和风险边界。",
+            "3. 如果还缺本地 CPU 审计、脚本或配置落盘、smoke 前置或首个实验包，就在当前对话里补齐，不要把这些准备动作外包成新的阶段。",
+            f"4. 当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL={EXECUTION_READY_SIGNAL}`，把链路推进到 execution。",
+            "",
+            "taskboard 使用说明：",
+            "- planning 不要停在“材料差一点”。当前上下文里还能补齐的审计、配置和 smoke 前置，就直接补齐。",
         ]
     )
+    submit_line = submit_binding_instruction_line(spec)
+    if submit_line:
+        lines.append(f"- {submit_line}")
     lines.extend(
-        execution_followthrough_instruction_lines(
-            spec,
-            allow_no_further_tasks=False,
-            profile=PROMPT_PROFILE_RESUME_COMPACT,
-        )
+        [
+            "",
+            *taskboard_footer_contract_lines(),
+        ]
     )
+    return join_prompt_lines(lines)
+
+
+def build_materials_ready_for_proposal_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
+    return build_continuous_planning_prompt(spec, trigger_signal=trigger_signal or EXECUTION_READY_SIGNAL)
+
+
+def build_continuous_research_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
+    normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
+    next_action_hint = controller_continuation_hint_from_spec(spec)
+    prompt_phase = effective_research_phase_for_session(
+        {
+            **spec,
+            "last_signal": normalized_trigger_signal or str(spec.get("last_signal", "")).strip(),
+            "waiting_state": normalized_trigger_signal or str(spec.get("waiting_state", "")).strip(),
+        },
+        next_action_hint=next_action_hint,
+        effective_wait_state=normalized_trigger_signal,
+    )
+    if normalized_trigger_signal == CLOSEOUT_READY_SIGNAL:
+        return build_continuous_transition_prompt(spec, trigger_signal=normalized_trigger_signal)
+    if prompt_phase == "planning":
+        return build_continuous_planning_prompt(spec, trigger_signal=normalized_trigger_signal)
+    return build_unified_execution_prompt(spec, trigger_signal=normalized_trigger_signal)
+
+
+def build_continuous_transition_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
+    normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
+    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
+    lines.extend(
+        [
+            "",
+            *prompt_block_lines("closeout_scene_intro"),
+            "没有人工干预时，你要把这一阶段加工成下一轮最稳妥的起点，并说明为什么现在应该收口，而不是继续扩展当前 proposal。",
+            (
+                f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
+                if normalized_trigger_signal
+                else "当前 proposal 已进入收口阶段。"
+            ),
+            "请不要把 closeout 当成偷懒出口；只有在 execution 中已经写明“为什么继续下去没有信息收益”后，closeout 才成立。",
+        ]
+    )
+    lines.extend(runtime_canonical_head_prompt_lines(spec))
+    next_action_lines = recent_project_history_next_action_prompt_lines(spec)
+    if next_action_lines:
+        lines.append("")
+        lines.extend(next_action_lines)
+    lines.extend(
+        [
+            "",
+            "本轮决策顺序：",
+            "1. 对当前 proposal 做全量数据统计、结果处理、内容总结，并且说人话：写清具体做了什么、得到了什么结果、这些 benchmark 数字在科学意义上说明了什么、对总体主线有什么影响。",
+            "2. 把当前 proposal 的关键结论、失败边界、时间戳和查询路径写入 project history，附上 proposal、report、receipt、artifact、handoff 等文件地址。",
+            "3. 写一份说人话的 handoff 文档：说明项目背景和现状、当前主线、待解决问题、必须阅读的文件，以及建议后续查阅哪些顶刊顶会方向；文献只能借鉴灵感，创新点必须从我们自己的结果里生长出来。",
+            "4. 做一次 handoff 确认 / binding 确认：明确 predecessor proposal、当前 closeout 文档、history 路径，以及下一阶段 planning 应继承的 proposal/handoff 入口，避免错绑。",
+            "5. 完成 closeout 后，本轮 `TASKBOARD_SIGNAL` 默认写 `none`；taskboard 会基于 handoff 继续 bootstrap 下一轮 planning。",
+        ]
+    )
+    lines.extend(["", "taskboard 使用说明："])
+    submit_line = submit_binding_instruction_line(spec)
+    if submit_line:
+        lines.append(f"- {submit_line}")
+    lines.append("- closeout 期间如果你发现还有一小步低风险、高信息增益、并且当前上下文里就能完成的动作，不要硬收口，说明理由后回到 execution。")
     lines.extend(["", *taskboard_footer_contract_lines()])
     return join_prompt_lines(lines)
 
@@ -8880,14 +9182,26 @@ def truncate_prompt_preserving_tail(head: str, tail: str, max_chars: int) -> str
     if not trimmed_tail:
         return combined[: normalized_max_chars - 1]
     if len(trimmed_tail) >= normalized_max_chars:
-        return trimmed_tail[: normalized_max_chars - 1]
+        priority_markers = [
+            "安全说明：",
+            "后续动作指令：",
+            "TASKBOARD_SIGNAL=",
+        ]
+        for marker in priority_markers:
+            marker_index = trimmed_tail.find(marker)
+            if marker_index < 0:
+                continue
+            candidate = trimmed_tail[marker_index:].strip()
+            if len(candidate) <= normalized_max_chars:
+                return candidate
+        return trimmed_tail[-(normalized_max_chars - 1):].strip()
     separator = "\n\n" if head.strip() else ""
     available_head_chars = normalized_max_chars - len(trimmed_tail) - len(separator)
     if available_head_chars <= 0:
-        return trimmed_tail[: normalized_max_chars - 1]
+        return trimmed_tail[-(normalized_max_chars - 1):].strip()
     trimmed_head = head.strip()[:available_head_chars].rstrip()
     if not trimmed_head:
-        return trimmed_tail[: normalized_max_chars - 1]
+        return trimmed_tail[-(normalized_max_chars - 1):].strip()
     return f"{trimmed_head}{separator}{trimmed_tail}".strip()
 
 def queued_notification_resume_context(entry: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -8953,11 +9267,22 @@ def build_queued_feedback_batch_prompt(
     entry_count = len(queued_notifications)
     context_spec = resume_prompt_context_spec(spec, queued_notifications)
     header_lines = [
-        f"后台合并回流：以下 {entry_count} 条更新来自同一会话，请合并判断共同影响，不要把它们当成新的独立对话。",
-        "先合并吸收这批更新，再决定当前唯一最高优先级动作。",
-        f"queued_update_count: {entry_count}",
+        *compact_runtime_resume_header_lines(context_spec),
+        "",
+        *prompt_block_lines("reflow_intro"),
     ]
-    header_lines.extend(compact_context_sections(context_spec, include_canonical_head=True, include_evidence_first=True))
+    if continuous_research_enabled:
+        header_lines.append(
+            "这是 continuous 主线上的一次合并回流。没有人工干预时，请先比较几条可选路径，再主动执行当前最有信息增益的一步，并说明理由。"
+        )
+    header_lines.extend(
+        [
+        f"这次共有 {entry_count} 条更新来自同一会话，请合并判断它们的共同影响，不要把它们拆成新的独立对话。",
+        f"queued_update_count: {entry_count}",
+        "",
+        *compact_context_sections(context_spec, include_canonical_head=True, include_evidence_first=True),
+        ]
+    )
     blocks = [
         build_batched_resume_notification_block(item, index=index, entry_count=entry_count)
         for index, item in enumerate(queued_notifications, start=1)
@@ -8966,7 +9291,7 @@ def build_queued_feedback_batch_prompt(
         "\n".join(
             execution_followthrough_instruction_lines(
                 context_spec,
-                allow_no_further_tasks=True,
+                allow_no_further_tasks=not continuous_research_enabled,
                 profile=PROMPT_PROFILE_RESUME_COMPACT,
             )
         ).strip(),
@@ -8974,21 +9299,14 @@ def build_queued_feedback_batch_prompt(
         "\n".join(
             [
                 "后续动作指令：",
-                "请先按 evidence-first 吸收上面的全部更新，再综合判断当前唯一最高优先级动作。",
+                "请先把上面的全部更新并回当前 proposal/history，再综合判断当前唯一最高优先级动作。",
+                "如果顺手还能完成便宜的审计、修复、数据处理或实验准备，也尽量在这一轮一起做掉。",
                 "请留在当前对话中继续推进，不要重置用户当前上下文。",
             ]
         ).strip(),
         "\n".join(taskboard_footer_contract_lines()).strip(),
     ]
-    sections = [
-        "\n".join(
-            compact_research_governance_header_lines(
-                context_spec,
-                continuous_mode=continuous_research_enabled,
-            )
-        ).strip(),
-        "\n".join(header_lines).strip(),
-    ]
+    sections = ["\n".join(header_lines).strip()]
     return "\n\n".join([section for section in [*sections, *blocks, *tail_sections] if section]).strip()
 
 
@@ -9047,15 +9365,14 @@ def build_resume_prompt(
         custom_instruction,
     )
     governance_head_lines: list[str] = [
-        *compact_research_governance_header_lines(
-            spec,
-            continuous_mode=continuous_research_enabled,
-        ),
+        *compact_runtime_resume_header_lines(spec),
         "",
         *build_resume_intro(str(spec.get("execution_mode", "")), spec),
     ]
+    if continuous_research_enabled:
+        governance_head_lines.append("这是 continuous 主线上的一次结果回流。没有人工干预时，请先比较几条可选路径，再主动执行当前最有信息增益的一步，并说明理由。")
     context_lines: list[str] = [
-        *compact_context_sections(spec, include_canonical_head=True),
+        *compact_context_sections(spec, include_canonical_head=True, include_evidence_first=True),
         "",
         *build_resume_event_detail_lines(spec, event),
     ]
@@ -9063,12 +9380,14 @@ def build_resume_prompt(
     governance_tail_lines: list[str] = [
         *execution_followthrough_instruction_lines(
             spec,
-            allow_no_further_tasks=True,
+            allow_no_further_tasks=not continuous_research_enabled,
             profile=PROMPT_PROFILE_RESUME_COMPACT,
         ),
         *build_resume_safety_lines(),
         "",
         "后续动作指令：",
+        "先把这次新增结果并回当前 proposal/history，再判断当前最值得做的一步。",
+        "如果顺手还能完成便宜的审计、修复、数据处理或实验准备，也尽量在这一轮一起做掉。",
         instruction,
         "请留在当前对话中继续推进，不要重置用户当前上下文。",
         "",
@@ -9102,6 +9421,7 @@ def build_protocol_self_check_repair_prompt(
         f"检测到的问题：{issue_summary}",
         "请保持当前上下文，只修复当前动作表达与协议尾部。",
     ]
+    lines.extend(compact_runtime_resume_header_lines(spec))
     lines.extend(compact_context_sections(spec, include_canonical_head=True))
     lines.extend(
         [
@@ -10237,9 +10557,13 @@ def effective_wait_state_for_session(
     if should_inherit_recent_next_action(session_state, next_action_hint or {}):
         return ""
     waiting_state = canonicalize_taskboard_signal(str(session_state.get("waiting_state", "")).strip())
+    if waiting_state == "none":
+        waiting_state = ""
     if waiting_state:
         return waiting_state
     last_signal = canonicalize_taskboard_signal(str(session_state.get("last_signal", "")).strip())
+    if last_signal == "none":
+        last_signal = ""
     if last_signal in PARKED_IDLE_SIGNALS or last_signal == WAITING_ON_ASYNC_SIGNAL:
         return last_signal
     return ""
@@ -10318,18 +10642,17 @@ def build_continuous_mode_status_payload(
     effective_last_signal = (
         WAITING_ON_ASYNC_SIGNAL
         if int(live_snapshot.get("running_task_count", live_snapshot.get("live_task_count", 0)) or 0) > 0
-        else WAITING_ON_FEEDBACK_SIGNAL
-        if int(live_snapshot.get("awaiting_feedback_task_count", 0) or 0) > 0
-        else LOCAL_MICROSTEP_BATCH_SIGNAL
+        else EXECUTION_READY_SIGNAL
         if local_next_action_active
         else (
             effective_wait_state
             or stored_last_signal
+            or "none"
         )
     )
-    human_guidance_active = bool(
-        load_human_guidance_mode(config, codex_session_id=resolved_session_id).get("active", False)
-    ) if resolved_session_id else False
+    automation_mode_name = automation_mode_label(config, codex_session_id=resolved_session_id) if resolved_session_id else "managed"
+    managed_mode_active = automation_mode_is_managed(config, codex_session_id=resolved_session_id) if resolved_session_id else False
+    backlog = reflow_backlog_summary(config, codex_session_id=resolved_session_id, followups=followups)
     parked_wait_age_seconds = (
         continuous_session_parked_wait_age_seconds(target_state)
         if effective_wait_state in PARKED_IDLE_SIGNALS
@@ -10357,11 +10680,18 @@ def build_continuous_mode_status_payload(
     parked_watchdog_due_at = format_unix_timestamp(parked_watchdog_due_ts) if parked_watchdog_due_ts > 0 else ""
     automation_recommendation = automation_recommendation_for_session(
         live_snapshot,
-        human_guidance_active=human_guidance_active,
+        human_guidance_active=managed_mode_active,
         effective_wait_state=effective_wait_state,
         parked_watchdog_due=parked_watchdog_due,
         next_action_hint=next_action_hint,
         session_state=target_state,
+    )
+    if managed_mode_active:
+        automation_recommendation = "managed_backlog_only"
+    effective_research_phase = effective_research_phase_for_session(
+        target_state,
+        next_action_hint=next_action_hint,
+        effective_wait_state=effective_wait_state,
     )
     proposal_bootstrap_ready = proposal_bootstrap_ready_for_session(
         target_state,
@@ -10377,6 +10707,8 @@ def build_continuous_mode_status_payload(
         "last_signal": effective_last_signal,
         "effective_wait_state": effective_wait_state,
         "effective_last_signal": effective_last_signal,
+        "research_phase": effective_research_phase,
+        "effective_research_phase": effective_research_phase,
         "running_task_count": int(live_snapshot.get("running_task_count", live_snapshot.get("live_task_count", 0)) or 0),
         "running_task_ids": list(live_snapshot.get("running_task_ids", live_snapshot.get("live_task_ids", []))),
         "live_task_count": int(live_snapshot.get("live_task_count", 0) or 0),
@@ -10414,6 +10746,11 @@ def build_continuous_mode_status_payload(
         "proposal_bootstrap_reason": str(next_action_hint.get("proposal_bootstrap_reason", "")).strip(),
         "proposal_dispatch_ready": proposal_dispatch_ready,
         "automation_recommendation": automation_recommendation,
+        "automation_mode": automation_mode_name,
+        "reflow_backlog_queue_depth": int(backlog.get("queue_depth", 0) or 0),
+        "reflow_backlog_followup_count": int(backlog.get("followup_count", 0) or 0),
+        "reflow_backlog_oldest_event_at": str(backlog.get("oldest_event_at", "")).strip(),
+        "reflow_backlog_latest_event_at": str(backlog.get("latest_event_at", "")).strip(),
     }
     return {
         **payload,
@@ -10422,6 +10759,8 @@ def build_continuous_mode_status_payload(
         "resolved_from": resolved_from,
         "effective_wait_state": effective_wait_state,
         "effective_last_signal": effective_last_signal,
+        "research_phase": effective_research_phase,
+        "effective_research_phase": effective_research_phase,
         "running_task_count": int(live_snapshot.get("running_task_count", live_snapshot.get("live_task_count", 0)) or 0),
         "running_task_ids": list(live_snapshot.get("running_task_ids", live_snapshot.get("live_task_ids", []))),
         "live_task_count": int(live_snapshot.get("live_task_count", 0) or 0),
@@ -10446,7 +10785,8 @@ def build_continuous_mode_status_payload(
         "platform_recovery_task_ids": list(live_snapshot.get("platform_recovery_task_ids", [])),
         "platform_attention_task_count": int(live_snapshot.get("platform_attention_task_count", 0) or 0),
         "platform_attention_task_ids": list(live_snapshot.get("platform_attention_task_ids", [])),
-        "human_guidance_active": human_guidance_active,
+        "automation_mode": automation_mode_name,
+        "managed_mode_active": managed_mode_active,
         "parked_wait_age_seconds": parked_wait_age_seconds,
         "parked_watchdog_due": parked_watchdog_due,
         "parked_watchdog_interval_seconds": parked_watchdog_interval_seconds,
@@ -10466,6 +10806,10 @@ def build_continuous_mode_status_payload(
         "proposal_bootstrap_reason": str(next_action_hint.get("proposal_bootstrap_reason", "")).strip(),
         "proposal_dispatch_ready": proposal_dispatch_ready,
         "automation_recommendation": automation_recommendation,
+        "reflow_backlog_queue_depth": int(backlog.get("queue_depth", 0) or 0),
+        "reflow_backlog_followup_count": int(backlog.get("followup_count", 0) or 0),
+        "reflow_backlog_oldest_event_at": str(backlog.get("oldest_event_at", "")).strip(),
+        "reflow_backlog_latest_event_at": str(backlog.get("latest_event_at", "")).strip(),
     }
 
 
@@ -10606,7 +10950,7 @@ def continuous_session_reminder_schedule_params(
             "delay_seconds": 0,
             "interval_seconds": DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS,
             "min_idle_seconds": 0,
-            "last_signal": MATERIALS_READY_FOR_PROPOSAL_SIGNAL,
+            "last_signal": EXECUTION_READY_SIGNAL,
         }
     if should_inherit_recent_next_action(current_state, next_action_hint or {}):
         return {
@@ -12251,15 +12595,15 @@ def command_current_thread(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_continuous_mode(args: argparse.Namespace) -> int:
+def command_automation_mode(args: argparse.Namespace) -> int:
     config = build_config(args)
     action = str(getattr(args, "action", "status") or "status").strip().lower()
     target_session_id, resolved_from = resolve_continuous_research_target_session_id(
         config,
         raw_session_id=getattr(args, "codex_session_id", ""),
     )
-    if action in {"on", "off", "toggle", "bind", "clear-session"} and not target_session_id:
-        raise ValueError("Missing target codex session id for session-scoped continuous-mode action.")
+    if action in {"managed", "continuous", "toggle", "bind", "clear-session"} and not target_session_id:
+        raise ValueError("Missing target codex session id for session-scoped automation-mode action.")
     try:
         if action == "status":
             payload = build_continuous_mode_status_payload(
@@ -12267,203 +12611,158 @@ def command_continuous_mode(args: argparse.Namespace) -> int:
                 target_session_id=target_session_id,
                 resolved_from=resolved_from,
             )
-        elif action == "on":
-            payload = set_continuous_research_mode(
+        elif action == "managed":
+            payload = set_automation_mode(
                 config,
-                enabled=True,
+                mode="managed",
                 codex_session_id=target_session_id,
                 updated_by="cli",
-                source="continuous-mode:on",
+                source="automation-mode:managed",
             )
-        elif action == "off":
-            payload = set_continuous_research_mode(
+        elif action == "continuous":
+            payload = set_automation_mode(
                 config,
-                enabled=False,
+                mode="continuous",
                 codex_session_id=target_session_id,
                 updated_by="cli",
-                source="continuous-mode:off",
+                source="automation-mode:continuous",
             )
         elif action == "toggle":
-            payload = toggle_continuous_research_mode(
+            payload = toggle_automation_mode(
                 config,
                 codex_session_id=target_session_id,
                 updated_by="cli",
-                source="continuous-mode:toggle",
+                source="automation-mode:toggle",
             )
         elif action == "bind":
             payload = bind_continuous_research_mode_session(
                 config,
                 codex_session_id=target_session_id,
                 updated_by="cli",
-                source="continuous-mode:bind",
+                source="automation-mode:bind",
             )
         elif action == "clear-session":
             payload = clear_continuous_research_mode_session(
                 config,
                 codex_session_id=target_session_id,
                 updated_by="cli",
-                source="continuous-mode:clear-session",
+                source="automation-mode:clear-session",
             )
         elif action == "clear-all":
             payload = clear_all_continuous_research_mode(
                 config,
                 updated_by="cli",
-                source="continuous-mode:clear-all",
+                source="automation-mode:clear-all",
             )
         else:
-            raise ValueError(f"Unsupported continuous mode action: {action}")
+            raise ValueError(f"Unsupported automation mode action: {action}")
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    backlog = reflow_backlog_summary(config, codex_session_id=target_session_id)
     payload = {
         **payload,
         "action": action,
+        "automation_mode": automation_mode_label(config, codex_session_id=target_session_id or str(payload.get("target_codex_session_id", "")).strip()),
         "target_codex_session_id": target_session_id or str(payload.get("target_codex_session_id", "")).strip(),
         "resolved_from": resolved_from or str(payload.get("resolved_from", "")).strip(),
+        "reflow_backlog": backlog,
     }
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
-    print(f"continuous_research_mode={'on' if payload.get('enabled', False) else 'off'} | action={action}")
+    print(f"automation_mode={payload.get('automation_mode', 'managed')} | action={action}")
     if payload.get("target_codex_session_id"):
         print(f"  target_codex_session_id: {payload['target_codex_session_id']}")
     if payload.get("resolved_from"):
         print(f"  resolved_from: {payload['resolved_from']}")
     if payload.get("default_codex_session_id"):
         print(f"  default_codex_session_id: {payload['default_codex_session_id']}")
-    enabled_sessions = [str(item).strip() for item in payload.get("enabled_sessions", []) if str(item).strip()]
-    if enabled_sessions:
-        print(f"  enabled_sessions: {', '.join(enabled_sessions)}")
-    sessions = payload.get("sessions", {})
-    if isinstance(sessions, dict) and sessions:
-        print("  session_states:")
-        for session_id in sorted(sessions):
-            state = sessions.get(session_id, {}) if isinstance(sessions.get(session_id, {}), dict) else {}
-            print(
-                "    - {session_id} | enabled={enabled} | waiting={waiting} | updated_at={updated_at} | updated_by={updated_by} | source={source}".format(
-                    session_id=session_id,
-                    enabled="on" if bool(state.get("enabled", False)) else "off",
-                    waiting=str(state.get("waiting_state", "") or "-"),
-                    updated_at=str(state.get("updated_at", "")),
-                    updated_by=str(state.get("updated_by", "")),
-                    source=str(state.get("source", "")),
-                )
-            )
-    if payload.get("legacy_enabled"):
-        print("  legacy_global_enabled: true")
-    if payload.get("updated_at"):
-        print(f"  updated_at: {payload['updated_at']}")
-    if payload.get("updated_by"):
-        print(f"  updated_by: {payload['updated_by']}")
-    if payload.get("source"):
-        print(f"  source: {payload['source']}")
+    summary = payload.get("reflow_backlog", {}) if isinstance(payload.get("reflow_backlog", {}), dict) else {}
+    print(
+        "  reflow_backlog: followups={followups} events={events} oldest={oldest} latest={latest}".format(
+            followups=int(summary.get("followup_count", 0) or 0),
+            events=int(summary.get("queue_depth", 0) or 0),
+            oldest=str(summary.get("oldest_event_at", "") or "-"),
+            latest=str(summary.get("latest_event_at", "") or "-"),
+        )
+    )
     return 0
 
 
-def command_human_guidance(args: argparse.Namespace) -> int:
+command_continuous_mode = command_automation_mode
+
+
+def command_backlog(args: argparse.Namespace) -> int:
     config = build_config(args)
     action = str(getattr(args, "action", "status") or "status").strip().lower()
-    target_session_id, resolved_from = resolve_human_guidance_target_session_id(
+    target_session_id, resolved_from = resolve_continuous_research_target_session_id(
         config,
         raw_session_id=getattr(args, "codex_session_id", ""),
     )
-    if action in {"on", "off", "toggle", "bind", "clear-session", "lease"} and not target_session_id:
-        raise ValueError("Missing target codex session id for session-scoped human-guidance action.")
-    if action == "status":
+    if action in {"status", "show", "clear"} and not target_session_id:
+        raise ValueError("Missing target codex session id for backlog action.")
+    if action in {"status", "show"}:
+        summary = reflow_backlog_summary(config, codex_session_id=target_session_id)
         payload = {
-            **load_human_guidance_mode(config, codex_session_id=target_session_id),
+            "action": action,
+            "target_codex_session_id": target_session_id,
             "resolved_from": resolved_from,
+            **summary,
         }
-    elif action == "on":
-        payload = set_human_guidance_mode(
-            config,
-            active=True,
-            codex_session_id=target_session_id,
-            lease_seconds=int(getattr(args, "lease_seconds", DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS) or DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS),
-            reason=str(getattr(args, "reason", "") or ""),
-            updated_by="cli",
-            source="human-guidance:on",
-        )
-    elif action == "off":
-        payload = set_human_guidance_mode(
-            config,
-            active=False,
-            codex_session_id=target_session_id,
-            updated_by="cli",
-            source="human-guidance:off",
-        )
-    elif action == "toggle":
-        payload = toggle_human_guidance_mode(
-            config,
-            codex_session_id=target_session_id,
-            lease_seconds=int(getattr(args, "lease_seconds", DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS) or DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS),
-            reason=str(getattr(args, "reason", "") or ""),
-            updated_by="cli",
-            source="human-guidance:toggle",
-        )
-    elif action == "bind":
-        payload = bind_human_guidance_mode_session(
-            config,
-            codex_session_id=target_session_id,
-            updated_by="cli",
-            source="human-guidance:bind",
-        )
-    elif action == "clear-session":
-        payload = clear_human_guidance_mode_session(
-            config,
-            codex_session_id=target_session_id,
-            updated_by="cli",
-            source="human-guidance:clear-session",
-        )
+    elif action == "clear":
+        cleared = clear_reflow_backlog(config, codex_session_id=target_session_id)
+        payload = {
+            "action": action,
+            "target_codex_session_id": target_session_id,
+            "resolved_from": resolved_from,
+            **cleared,
+        }
     elif action == "clear-all":
-        payload = clear_all_human_guidance_mode(
-            config,
-            updated_by="cli",
-            source="human-guidance:clear-all",
-        )
-    elif action == "lease":
-        payload = set_human_guidance_mode(
-            config,
-            active=True,
-            codex_session_id=target_session_id,
-            lease_seconds=int(getattr(args, "lease_seconds", DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS) or DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS),
-            reason=str(getattr(args, "reason", "") or ""),
-            updated_by="cli",
-            source="human-guidance:lease",
-        )
+        cleared = clear_reflow_backlog(config, clear_all=True)
+        payload = {
+            "action": action,
+            "target_codex_session_id": "",
+            "resolved_from": resolved_from,
+            **cleared,
+        }
     else:
-        raise ValueError(f"Unsupported human-guidance action: {action}")
-    payload = {
-        **payload,
-        "action": action,
-        "target_codex_session_id": target_session_id or str(payload.get("target_codex_session_id", "")).strip(),
-        "resolved_from": resolved_from or str(payload.get("resolved_from", "")).strip(),
-    }
+        raise ValueError(f"Unsupported backlog action: {action}")
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
-    print(f"human_guidance_mode={'on' if payload.get('active', False) else 'off'} | action={action}")
+    print(f"backlog action={action}")
     if payload.get("target_codex_session_id"):
         print(f"  target_codex_session_id: {payload['target_codex_session_id']}")
     if payload.get("resolved_from"):
         print(f"  resolved_from: {payload['resolved_from']}")
-    if payload.get("default_codex_session_id"):
-        print(f"  default_codex_session_id: {payload['default_codex_session_id']}")
-    active_sessions = [str(item).strip() for item in payload.get("active_sessions", []) if str(item).strip()]
-    if active_sessions:
-        print(f"  active_sessions: {', '.join(active_sessions)}")
-    target_state = payload.get("target_session_state", {}) if isinstance(payload.get("target_session_state", {}), dict) else {}
-    if target_state:
-        if target_state.get("paused_until"):
-            print(f"  paused_until: {target_state['paused_until']}")
-        if target_state.get("reason"):
-            print(f"  reason: {target_state['reason']}")
-    if payload.get("updated_at"):
-        print(f"  updated_at: {payload['updated_at']}")
-    if payload.get("updated_by"):
-        print(f"  updated_by: {payload['updated_by']}")
-    if payload.get("source"):
-        print(f"  source: {payload['source']}")
+    if action in {"status", "show"}:
+        print(
+            "  followups={followups} events={events} oldest={oldest} latest={latest}".format(
+                followups=int(payload.get("followup_count", 0) or 0),
+                events=int(payload.get("queue_depth", 0) or 0),
+                oldest=str(payload.get("oldest_event_at", "") or "-"),
+                latest=str(payload.get("latest_event_at", "") or "-"),
+            )
+        )
+        if action == "show":
+            for entry in payload.get("entries", []):
+                print(
+                    "    - followup={followup_key} session={session} events={events} oldest={oldest} latest={latest}".format(
+                        followup_key=str(entry.get("followup_key", "") or "-"),
+                        session=str(entry.get("codex_session_id", "") or "-"),
+                        events=int(entry.get("queue_depth", 0) or 0),
+                        oldest=str(entry.get("oldest_event_at", "") or "-"),
+                        latest=str(entry.get("latest_event_at", "") or "-"),
+                    )
+                )
+    else:
+        print(
+            "  cleared_followups={followups} cleared_events={events}".format(
+                followups=int(payload.get("cleared_followups", 0) or 0),
+                events=int(payload.get("cleared_events", 0) or 0),
+            )
+        )
     return 0
 
 
@@ -13413,7 +13712,7 @@ def command_prompt_preview(args: argparse.Namespace) -> int:
             print(f"Task spec not found: {task_id}", file=sys.stderr)
             return 1
         spec = loaded_spec
-        if args.scene in {"resume", "queued"}:
+        if args.scene in {"resume", "reflow-batch"}:
             try:
                 event_path = resolve_event_path(config, task_id, args.event_file)
             except ValueError as exc:
@@ -13421,20 +13720,13 @@ def command_prompt_preview(args: argparse.Namespace) -> int:
                 return 1
             event = load_event(event_path)
     scene = str(args.scene).strip()
-    if scene == "standard":
-        prompt = build_standard_followup_prompt(spec, continuous_research_enabled=args.continuous)
-    elif scene == "continuous":
-        prompt = build_continuous_research_prompt(spec, trigger_signal=args.trigger_signal)
-    elif scene == "parked":
-        prompt = build_parked_watchdog_prompt(spec, trigger_signal=args.trigger_signal or PARKED_IDLE_SIGNAL)
-    elif scene == "materials":
-        prompt = build_materials_ready_for_proposal_prompt(
-            spec,
-            trigger_signal=args.trigger_signal or MATERIALS_READY_FOR_PROPOSAL_SIGNAL,
-        )
-    elif scene == "transition":
+    if scene == "planning":
+        prompt = build_continuous_planning_prompt(spec, trigger_signal=args.trigger_signal)
+    elif scene == "execution":
+        prompt = build_unified_execution_prompt(spec, trigger_signal=args.trigger_signal)
+    elif scene == "closeout":
         prompt = build_continuous_transition_prompt(spec, trigger_signal=args.trigger_signal)
-    elif scene == "queued":
+    elif scene == "reflow-batch":
         prompt = build_queued_feedback_batch_prompt(
             spec,
             [{"resume_spec": spec, "resume_event": event}],
@@ -13720,6 +14012,7 @@ def handle_task_feedback(
             merge_task_state(
                 config,
                 task_id,
+                research_phase="closeout",
                 followup_status="scheduled" if continuous_followup_scheduled else str(load_task_state(config, task_id).get("followup_status", "")),
                 followup_last_signal=notification_signal,
                 followup_last_action=(
@@ -13742,10 +14035,12 @@ def handle_task_feedback(
                     "recovered_with_continue": notification.get("recovered_with_continue", False),
                     "continuous_research_mode": True,
                     "continuous_override_signal": notification_signal,
+                    "research_phase": "closeout",
                 },
             )
             notification["continuous_research_mode"] = True
             notification["continuous_transition_followup_scheduled"] = continuous_followup_scheduled
+            notification["research_phase"] = "closeout"
             return notification
         if notification.get("ok", False) and notification_signal in PARKED_IDLE_SIGNALS:
             session_id = str(spec.get("codex_session_id", "")).strip()
@@ -13782,6 +14077,7 @@ def handle_task_feedback(
             merge_task_state(
                 config,
                 task_id,
+                research_phase="execution",
                 session_flow_state="parked_idle",
                 followup_status="scheduled" if immediate_watchdog_scheduled else "resolved",
                 followup_last_signal=notification_signal,
@@ -13795,12 +14091,14 @@ def handle_task_feedback(
                 notification_signal=notification_signal,
                 notification_summary={
                     **(notification.get("notification_summary", {}) if isinstance(notification.get("notification_summary"), dict) else {}),
+                    "research_phase": "execution",
                     "session_flow_state": "parked_idle",
                     "taskboard_signal": notification_signal,
                     "waiting_evidence_token": evidence_token,
                     "immediate_parked_watchdog_scheduled": immediate_watchdog_scheduled,
                 },
             )
+            notification["research_phase"] = "execution"
             notification["session_flow_state"] = "parked_idle"
             notification["waiting_evidence_token"] = evidence_token
             notification["immediate_parked_watchdog_scheduled"] = immediate_watchdog_scheduled
@@ -13820,6 +14118,7 @@ def handle_task_feedback(
             merge_task_state(
                 config,
                 task_id,
+                research_phase="execution",
                 session_flow_state="inline_continue",
                 followup_status="resolved",
                 followup_last_signal=notification_signal,
@@ -13829,14 +14128,66 @@ def handle_task_feedback(
                 notification_signal=notification_signal,
                 notification_summary={
                     **current_summary,
+                    "research_phase": "execution",
                     "session_flow_state": "inline_continue",
                     "taskboard_signal": notification_signal,
                     "waiting_evidence_token": evidence_token,
                 },
             )
+            notification["research_phase"] = "execution"
             notification["session_flow_state"] = "inline_continue"
             notification["waiting_evidence_token"] = evidence_token
             notification["inline_continue_no_wake"] = True
+            return notification
+        if notification.get("ok", False) and notification_signal == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
+            current_state = load_task_state(config, task_id)
+            current_summary = current_state.get("notification_summary", {}) if isinstance(current_state.get("notification_summary", {}), dict) else {}
+            proposal_materialization_followup_scheduled = False
+            session_id = str(spec.get("codex_session_id", "")).strip()
+            evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec) if session_id else ""
+            if session_id:
+                clear_continuous_research_session_waiting_state(
+                    config,
+                    codex_session_id=session_id,
+                    evidence_token=evidence_token,
+                    last_signal=notification_signal,
+                    updated_by="feedback",
+                    source=PROPOSAL_MATERIALIZATION_REASON,
+                )
+            if should_schedule_followup_for_spec(spec):
+                schedule_continuous_transition_followup(
+                    config,
+                    task_id=task_id,
+                    spec=spec,
+                    trigger_signal=notification_signal,
+                    message_path=str(task_last_message_path(config, task_id)),
+                )
+                proposal_materialization_followup_scheduled = True
+            merge_task_state(
+                config,
+                task_id,
+                research_phase="closeout",
+                session_flow_state="proposal_materialization",
+                followup_status="scheduled" if proposal_materialization_followup_scheduled else str(current_state.get("followup_status", "")),
+                followup_last_signal=notification_signal,
+                followup_last_action=(
+                    f"scheduled:{CONTINUOUS_RESEARCH_TRANSITION_REASON}"
+                    if proposal_materialization_followup_scheduled
+                    else "proposal_materialization_without_followup"
+                ),
+                followup_stopped_at="" if proposal_materialization_followup_scheduled else str(current_state.get("followup_stopped_at", "")),
+                followup_last_message_path=str(task_last_message_path(config, task_id)),
+                notification_signal=notification_signal,
+                notification_summary={
+                    **current_summary,
+                    "research_phase": "closeout",
+                    "session_flow_state": "proposal_materialization",
+                    "taskboard_signal": notification_signal,
+                },
+            )
+            notification["research_phase"] = "closeout"
+            notification["session_flow_state"] = "proposal_materialization"
+            notification["proposal_materialization_followup_scheduled"] = proposal_materialization_followup_scheduled
             return notification
         if notification.get("ok", False) and notification_signal in LOCAL_MICROSTEP_BATCH_SIGNALS:
             current_state = load_task_state(config, task_id)
@@ -13855,11 +14206,11 @@ def handle_task_feedback(
                     source="handle-task-feedback-local-microstep",
                 )
             if should_schedule_followup_for_spec(spec):
-                schedule_local_microstep_followup(config, task_id=task_id, spec=spec)
-                local_followup_scheduled = True
+                local_followup_scheduled = schedule_local_microstep_followup(config, task_id=task_id, spec=spec)
             merge_task_state(
                 config,
                 task_id,
+                research_phase="execution",
                 session_flow_state="local_active",
                 followup_status="scheduled" if local_followup_scheduled else str(current_state.get("followup_status", "")),
                 followup_last_signal=notification_signal,
@@ -13871,10 +14222,12 @@ def handle_task_feedback(
                 notification_signal=notification_signal,
                 notification_summary={
                     **current_summary,
+                    "research_phase": "execution",
                     "session_flow_state": "local_active",
                     "taskboard_signal": notification_signal,
                 },
             )
+            notification["research_phase"] = "execution"
             notification["session_flow_state"] = "local_active"
             notification["local_microstep_followup_scheduled"] = local_followup_scheduled
             return notification
@@ -13911,6 +14264,7 @@ def handle_task_feedback(
                 merge_task_state(
                     config,
                     task_id,
+                    research_phase="execution",
                     session_flow_state="parked_idle",
                     followup_status="resolved",
                     followup_last_signal=notification_signal,
@@ -13919,6 +14273,7 @@ def handle_task_feedback(
                     notification_signal=notification_signal,
                     notification_summary={
                         **current_summary,
+                        "research_phase": "execution",
                         "session_flow_state": "parked_idle",
                         "taskboard_signal": notification_signal,
                         "guarded_invalid_waiting_signal": True,
@@ -13926,6 +14281,7 @@ def handle_task_feedback(
                         "waiting_evidence_token": guarded_evidence_token,
                     },
                 )
+                notification["research_phase"] = "execution"
                 notification["session_flow_state"] = "parked_idle"
                 notification["guarded_invalid_waiting_signal"] = True
                 notification["guarded_to"] = parked_waiting_state
@@ -13941,11 +14297,11 @@ def handle_task_feedback(
                     source="handle-task-feedback-waiting-on-async",
                 )
             if not newer_async_task_exists and not live_task_present and should_schedule_followup_for_spec(spec):
-                schedule_waiting_on_async_watchdog(config, task_id=task_id, spec=spec)
-                waiting_followup_scheduled = True
+                waiting_followup_scheduled = schedule_waiting_on_async_watchdog(config, task_id=task_id, spec=spec)
             merge_task_state(
                 config,
                 task_id,
+                research_phase="execution",
                 session_flow_state="awaiting_async",
                 followup_status=(
                     "scheduled"
@@ -13971,12 +14327,14 @@ def handle_task_feedback(
                 notification_signal=notification_signal,
                 notification_summary={
                     **current_summary,
+                    "research_phase": "execution",
                     "session_flow_state": "awaiting_async",
                     "taskboard_signal": notification_signal,
                     "newer_async_task_exists": newer_async_task_exists,
                     "live_task_present": live_task_present,
                 },
             )
+            notification["research_phase"] = "execution"
             notification["session_flow_state"] = "awaiting_async"
             notification["waiting_on_async_watchdog_scheduled"] = waiting_followup_scheduled
             notification["newer_async_task_exists"] = newer_async_task_exists
@@ -14652,16 +15010,14 @@ def build_selected_task_detail_lines(
         )
     session_id = str(state.get("codex_session_id", "")).strip()
     if session_id:
-        human_payload = load_human_guidance_mode(config, codex_session_id=session_id)
-        if human_payload.get("active", False):
-            target_state = human_payload.get("target_session_state", {}) if isinstance(human_payload.get("target_session_state", {}), dict) else {}
-            paused_until = str(target_state.get("paused_until", "")).strip() or "-"
-            lines.append(
-                dashboard_trim(
-                    f"  human-guidance: active until={paused_until} source={target_state.get('source', '-') or '-'}",
-                    width - 1,
-                )
+        session_mode = automation_mode_label(config, codex_session_id=session_id)
+        backlog = reflow_backlog_summary(config, codex_session_id=session_id)
+        lines.append(
+            dashboard_trim(
+                f"  automation: mode={session_mode} backlog_events={int(backlog.get('queue_depth', 0) or 0)} backlog_followups={int(backlog.get('followup_count', 0) or 0)}",
+                width - 1,
             )
+        )
     if state.get("attention_message"):
         lines.append(dashboard_trim(f"  note: {state.get('attention_message')}", width - 1))
     if state.get("failure_excerpt"):
@@ -14761,8 +15117,8 @@ def build_dashboard_view_from_snapshot(
     enriched_states = list(snapshot["enriched_states"])
     process_hints = list(snapshot["process_hints"])
     resolved_process_panel_mode = str(snapshot["process_panel_mode"])
-    continuous_mode = continuous_research_mode_label(config)
-    human_guidance_mode = human_guidance_mode_label(config)
+    automation_mode_name = automation_mode_label(config)
+    backlog_summary = reflow_backlog_summary(config, followups=list(followups.values()) if isinstance(followups, dict) else None)
     visible_states = sort_dashboard_tasks(
         config,
         filter_dashboard_tasks(config, enriched_states, status_filter=status_filter, agent_filter=agent_filter),
@@ -14778,7 +15134,7 @@ def build_dashboard_view_from_snapshot(
             width - 1,
         ),
         dashboard_trim(
-            f"[gpu slots {sum(int(item.get('gpu_slots', 0) or 0) for item in active_states)}/{total_gpu_slots or '-'}] [cpu budget {active_cpu_threads}/{cpu_thread_limit}] [sort {sort_mode}] [filter {status_filter}] [agent {agent_filter}] [process {resolved_process_panel_mode}] [continuous {continuous_mode}] [human-pause {human_guidance_mode}]",
+            f"[gpu slots {sum(int(item.get('gpu_slots', 0) or 0) for item in active_states)}/{total_gpu_slots or '-'}] [cpu budget {active_cpu_threads}/{cpu_thread_limit}] [sort {sort_mode}] [filter {status_filter}] [agent {agent_filter}] [process {resolved_process_panel_mode}] [mode {automation_mode_name}] [backlog {int(backlog_summary.get('queue_depth', 0) or 0)}]",
             width - 1,
         ),
     ]
@@ -14829,8 +15185,8 @@ def build_dashboard_view_from_snapshot(
         "selected_task_id": selected_entry["task_id"] if selected_entry else "",
         "selected_index": normalized_selected_index,
         "process_panel_mode": resolved_process_panel_mode,
-        "continuous_research_mode": continuous_mode,
-        "human_guidance_mode": human_guidance_mode,
+        "automation_mode": automation_mode_name,
+        "reflow_backlog": backlog_summary,
     }
 
 
@@ -15148,6 +15504,7 @@ def draw_dashboard(stdscr: Any, config: AppConfig, limit: int, refresh_seconds: 
     force_refresh = True
     last_input_at = 0.0
     input_poll_ms = 50
+    show_backlog = False
     while True:
         height, width = stdscr.getmaxyx()
         width = max(2, width)
@@ -15184,6 +15541,23 @@ def draw_dashboard(stdscr: Any, config: AppConfig, limit: int, refresh_seconds: 
         selected_index = int(view.get("selected_index", 0) or 0)
         selected_task_id = str(view.get("selected_task_id", ""))
         top_lines = list(view["header_lines"]) + [""] + list(view["gpu_lines"])
+        backlog_summary = view.get("reflow_backlog", {}) if isinstance(view.get("reflow_backlog", {}), dict) else {}
+        if show_backlog:
+            top_lines.extend(
+                [
+                    "",
+                    "Reflow Backlog",
+                    dashboard_trim(
+                        "  followups={followups} events={events} oldest={oldest} latest={latest}".format(
+                            followups=int(backlog_summary.get("followup_count", 0) or 0),
+                            events=int(backlog_summary.get("queue_depth", 0) or 0),
+                            oldest=str(backlog_summary.get("oldest_event_at", "") or "-"),
+                            latest=str(backlog_summary.get("latest_event_at", "") or "-"),
+                        ),
+                        width - 1,
+                    ),
+                ]
+            )
         if view["process_lines"]:
             top_lines.extend([""] + list(view["process_lines"]))
         detail_lines = ["", *view["detail_lines"]]
@@ -15220,8 +15594,8 @@ def draw_dashboard(stdscr: Any, config: AppConfig, limit: int, refresh_seconds: 
             row += 1
         footer = (
             f"q quit | SPACE pause={'on' if paused else 'off'} | j/k move | PgUp/PgDn page | g/G top/bottom | "
-            f"s sort | f filter | [/] agent | p process | +/- priority | c continuous={view.get('continuous_research_mode', 'off')} | "
-            f"h human-pause={view.get('human_guidance_mode', 'off')}"
+            f"s sort | f filter | [/] agent | p process | +/- priority | c mode={view.get('automation_mode', 'managed')} | "
+            f"b backlog={'on' if show_backlog else 'off'} | x clear-backlog"
         )
         safe_dashboard_addnstr(stdscr, height - 1, 0, dashboard_trim(footer, width - 1), max(0, width - 1), curses.color_pair(6) | curses.A_BOLD)
         stdscr.refresh()
@@ -15246,7 +15620,7 @@ def draw_dashboard(stdscr: Any, config: AppConfig, limit: int, refresh_seconds: 
             continue
         if key == ord("c"):
             target_session_id, _ = resolve_continuous_research_target_session_id(config)
-            toggle_continuous_research_mode(
+            toggle_automation_mode(
                 config,
                 codex_session_id=target_session_id,
                 updated_by="dashboard",
@@ -15254,15 +15628,13 @@ def draw_dashboard(stdscr: Any, config: AppConfig, limit: int, refresh_seconds: 
             )
             force_refresh = True
             continue
-        if key == ord("h"):
-            target_session_id, _ = resolve_human_guidance_target_session_id(config)
+        if key == ord("b"):
+            show_backlog = not show_backlog
+            continue
+        if key == ord("x"):
+            target_session_id, _ = resolve_continuous_research_target_session_id(config)
             if target_session_id:
-                toggle_human_guidance_mode(
-                    config,
-                    codex_session_id=target_session_id,
-                    updated_by="dashboard",
-                    source="dashboard_hotkey",
-                )
+                clear_reflow_backlog(config, codex_session_id=target_session_id)
                 force_refresh = True
             continue
         if key in {ord("j"), curses.KEY_DOWN} and task_entries:
@@ -15752,7 +16124,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_args(prompt_preview)
     prompt_preview.add_argument(
         "--scene",
-        choices=["resume", "standard", "continuous", "parked", "materials", "transition", "queued", "protocol-repair"],
+        choices=["resume", "planning", "execution", "closeout", "reflow-batch", "protocol-repair"],
         default="resume",
     )
     prompt_preview.add_argument("--task-id")
@@ -15761,39 +16133,37 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_preview.add_argument("--continuous", action="store_true")
     prompt_preview.set_defaults(func=command_prompt_preview)
 
-    continuous_mode = subparsers.add_parser(
-        "continuous-mode",
-        help="Inspect or toggle the persistent continuous research automation mode.",
+    automation_mode = subparsers.add_parser(
+        "automation-mode",
+        help="Inspect or switch the persistent taskboard automation mode between managed and continuous.",
     )
-    add_config_args(continuous_mode)
-    continuous_mode.add_argument(
+    add_config_args(automation_mode)
+    automation_mode.add_argument(
         "action",
         nargs="?",
-        choices=["status", "on", "off", "toggle", "bind", "clear-session", "clear-all"],
+        choices=["status", "managed", "continuous", "toggle", "bind", "clear-session", "clear-all"],
         default="status",
     )
-    continuous_mode.add_argument("--session-id", dest="codex_session_id", default="")
-    continuous_mode.add_argument("--codex-session-id", dest="codex_session_id")
-    continuous_mode.add_argument("--json", action="store_true")
-    continuous_mode.set_defaults(func=command_continuous_mode)
+    automation_mode.add_argument("--session-id", dest="codex_session_id", default="")
+    automation_mode.add_argument("--codex-session-id", dest="codex_session_id")
+    automation_mode.add_argument("--json", action="store_true")
+    automation_mode.set_defaults(func=command_automation_mode)
 
-    human_guidance = subparsers.add_parser(
-        "human-guidance",
-        help="Temporarily pause automatic taskboard wakeups for human steering in the bound Codex session.",
+    backlog = subparsers.add_parser(
+        "backlog",
+        help="Inspect or clear queued reflow backlog for the bound Codex session.",
     )
-    add_config_args(human_guidance)
-    human_guidance.add_argument(
+    add_config_args(backlog)
+    backlog.add_argument(
         "action",
         nargs="?",
-        choices=["status", "on", "off", "toggle", "bind", "clear-session", "clear-all", "lease"],
+        choices=["status", "show", "clear", "clear-all"],
         default="status",
     )
-    human_guidance.add_argument("--session-id", dest="codex_session_id", default="")
-    human_guidance.add_argument("--codex-session-id", dest="codex_session_id")
-    human_guidance.add_argument("--lease-seconds", type=int, default=DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS)
-    human_guidance.add_argument("--reason", default="")
-    human_guidance.add_argument("--json", action="store_true")
-    human_guidance.set_defaults(func=command_human_guidance)
+    backlog.add_argument("--session-id", dest="codex_session_id", default="")
+    backlog.add_argument("--codex-session-id", dest="codex_session_id")
+    backlog.add_argument("--json", action="store_true")
+    backlog.set_defaults(func=command_backlog)
 
     ps_training = subparsers.add_parser("ps-training", help="List current Ubuntu training-like processes, including external ones not tracked by the taskboard.")
     add_config_args(ps_training)

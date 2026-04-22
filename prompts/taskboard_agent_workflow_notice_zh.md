@@ -2,21 +2,34 @@
 
 runtime 默认从 `prompts/taskboard_runtime_prompt_zh.toml` 读取自动唤起 prompt 文案；也可以用 `CODEX_TASKBOARD_PROMPT_FILE` 或 `~/.config/codex-taskboard/taskboard_runtime_prompt_zh.toml` 覆盖。
 
+## 状态机
+
+- 外部自动化模式只分两类：`managed` 与 `continuous`。
+- 科研阶段只分三类：`planning`、`execution`、`closeout`。
+- agent 对 taskboard 的公开信号只保留：`EXECUTION_READY`、`WAITING_ON_ASYNC`、`CLOSEOUT_READY`、`none`。
+- `managed` 只托管任务和回流 backlog，不自动再唤起；`continuous` 才会在同一 session 内循环 `planning -> execution -> closeout -> planning`。
+- `protocol-repair` 保留为唯一纠错支线：agent 没有按尾部协议回复时，taskboard 发送极短修复 prompt，而不是重新注入长治理文本。
+
 ## 轻度科研约定
 
-1. 先读 `proposal_file`、`project_history_file` 和本轮回流，再决定下一步；要设计新实验时，再对照必要文献和官方文档/推荐参数，不要脱离 proposal/history 盲调。
-2. 同一认知线程里的本地短工作默认一次做完：结果读取、CPU 审计、数据处理、必要代码修复、proposal/history 写回、必要文献对照。不要把几分钟内能完成的 CPU-only 小步拆成新阶段、新 proposal 或单独报告。
-3. 默认先怀疑实现，再解释结果。只要结果异常、和 history/文献/官方文档冲突、日志异常、smoke 失败、OOM 或代码报错，就先诊断代码逻辑、数据契约、数据泄漏、评测污染、split、配置与 run 完整性；没有排查清楚前，不要把结果当成有效结论继续扩实验。
-4. 正式 GPU/remote 实验前必须先过 smoke。launch 失败、OOM、明显 bug、参数错误、路径错误、配置错配都属于执行问题，不是科研结论；能在当前对话修掉的就直接修掉，不要把这些问题包装成单独实验阶段。
-5. 先做对，再做快。正式 GPU 实验先看训练/推理框架官方文档与推荐参数，优先把吞吐、显存占用和 GPU 利用率调到合理水平；程序明显低效时，先优化实验程序效率再正式发车。
-6. 写回 proposal/history 时必须说人话：写清 benchmark/数据集、比较对象、关键数字、变化趋势、科学含义和 next bounded action；不要只写项目缩写和内部代号。
-7. 当前 proposal 收口后不要停在完成态。先把可靠结果、失败边界、关键诊断和 next bounded action 写回当前 proposal；如果方向已无信息增益，就转成新 proposal 或提交下一条受托管实验。
+1. 先读 `proposal_file`、`project_history_file` 和本轮新增结果，把当前主线、已有边界和最新变化接起来之后再决定下一步；如果问题已经进入新的方法方向，就补读这个方向最关键的旧文献与近年的代表性新工作，再让新设想从我们自己的结果里长出来。
+2. 当前上下文里能完成的本地 CPU 工作尽量一次做深做完：结果读取、代码和数据审计、必要修复、数据处理、proposal/history 写回、实验准备都尽量在这一轮解决，不要把本来几分钟内能完成的事情人为拆散。
+3. 只要结果异常好、异常差、日志异常、关键数字反常，或者和已有 history、文献、官方推荐参数冲突，就先检查实现、数据契约、数据划分、评测污染、配置和运行完整性；没有审清之前，不把它当成可靠科研结论。
+4. 正式提交 GPU、远程或长时间实验前，先把 smoke、参数、效率、显存和资源占用检查清楚；如果还有能在当前上下文里顺手补齐的前置工作，就先补齐，让实验包以更稳的状态进入 taskboard 生命周期。
+5. 没有人工干预时，先比较几条可选路径，再主动执行当前信息增益最高的一步，并说明为什么这样选；凡是能顺手提高结论可信度、减少后续歧义、或者直接推进下一步实验的分析、修复和写回，也尽量一起做掉。
 
 ## Taskboard 操作简介
 
-- 当前对话能完成的 CPU-only 工作，直接做完；不需要再次唤起就输出 `TASKBOARD_SIGNAL=LOCAL_CONTINUE_NO_WAKE`，需要短延迟再进来就输出 `TASKBOARD_SIGNAL=LOCAL_MICROSTEP_BATCH`。
-- 需要 GPU、remote、长时间等待或独立生命周期的任务，用 `codex-taskboard submit`。
-- 本地跨回复长任务，未启动先 `bind-before-launch`，已启动后用 `attach-pid` 接管；正式实验默认优先用 tmux 托管。
-- 已有 live task 且当前只是等待结果，用 `TASKBOARD_SIGNAL=WAITING_ON_ASYNC`；只有在没有新 evidence、没有 live task、也没有本地动作时，才用 `TASKBOARD_SIGNAL=PARKED_IDLE`。
+- 当前对话能完成的 CPU-only 工作，直接做完；不要为了 signal 把短工作拆成多轮。
+- 真正需要 GPU、remote、长时间等待或独立生命周期时，才用 `codex-taskboard submit`；本地跨回复长任务再用 `bind-before-launch` / `attach-pid` 接管，正式实验默认优先用 tmux 托管。
+- `TASKBOARD_SIGNAL=WAITING_ON_ASYNC` 表示已有 live task 等回流；taskboard 默认按 1 小时节奏提醒对应 agent 回来确认一次，只为确认实验没卡住且仍有日志/结果产出。
+- backlog/回流积压可用 dashboard 或 `codex-taskboard backlog` 查看与清理；`dashboard` 也会显示当前 session 的 `automation-mode` 与 backlog 计数。
+- closeout / planning 转场前先做 handoff 确认：核对 predecessor proposal、closeout 文档、handoff 文档、`project_history_file` 与 `proposal_path` 绑定，避免错绑。
 
-协议尾部保持固定：`TASKBOARD_PROTOCOL_ACK=TBP1`、`CURRENT_STEP_CLASS=...`、`TASKBOARD_SELF_CHECK=...`、`LIVE_TASK_STATUS=...`、`FINAL_SIGNAL=...`。
+## 协议尾部
+
+回复末尾固定输出：
+
+- `TASKBOARD_SIGNAL=EXECUTION_READY|WAITING_ON_ASYNC|CLOSEOUT_READY|none`
+- `TASKBOARD_SELF_CHECK=pass|fail`
+- `LIVE_TASK_STATUS=none|submitted|awaiting`

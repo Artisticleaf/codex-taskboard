@@ -1,0 +1,22 @@
+# prompt_source: /home/Awei/codex-taskboard/prompts/taskboard_runtime_prompt_zh.toml
+协议修复提醒：上一条回复没有给出可执行的 taskboard 协议尾部，taskboard 现在无法安全判断下一步。
+检测到的问题：missing_protocol_footer
+请保持当前上下文，只修复当前动作表达与协议尾部。
+
+当前绑定：
+proposal_file: [/home/Awei/project/docs/PROPOSAL.md]
+closeout_proposal_dir: [/home/Awei/project/docs/closeout]
+project_history_file: [/home/Awei/project/docs/HISTORY.md]
+project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
+authoritative proposal 以上面的 proposal_file 为准。
+本轮可靠结果、关键诊断结论和 next bounded action 默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。
+请不要重写整段 proposal，也不要重新展开长篇分析。
+只做两件事：
+1. 用 1-2 句人话确认当前唯一最高优先级动作；如果它仍是当前回合内可吸收的本地短步骤，可以直接做完再回复。
+2. 在回复末尾补齐完整协议尾部；若已经提交 live task，LIVE_TASK_STATUS 必须写 `submitted` 或 `awaiting`。
+请留在当前对话中继续推进，不要重置用户当前上下文。
+
+回复末尾请单独补一组自检行：
+TASKBOARD_SIGNAL=EXECUTION_READY|WAITING_ON_ASYNC|CLOSEOUT_READY|none
+TASKBOARD_SELF_CHECK=pass|fail
+LIVE_TASK_STATUS=none|submitted|awaiting

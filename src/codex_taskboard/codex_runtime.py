@@ -298,7 +298,7 @@ def resume_codex_session_with_prompt(
         retry_after = hooks.human_guidance_retry_after_seconds(config, codex_session_id=resumed_session_id)
         hooks.append_log(
             log_path,
-            f"resume_deferred reason=human_guidance_pause session_id={resumed_session_id} retry_after_seconds={retry_after}",
+            f"resume_deferred reason=managed_mode_pause session_id={resumed_session_id} retry_after_seconds={retry_after}",
         )
         result.update(
             hooks.build_deferred_resume_result(
@@ -306,7 +306,7 @@ def resume_codex_session_with_prompt(
                 resumed_session_id=resumed_session_id,
                 codex_exec_mode=spec["codex_exec_mode"],
                 prompt_chars=len(prompt),
-                deferred_reason="human_guidance_pause",
+                deferred_reason="managed_mode_pause",
                 retry_after_seconds=retry_after,
                 attempted=False,
                 started_at=started_at,

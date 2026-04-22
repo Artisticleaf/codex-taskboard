@@ -118,16 +118,9 @@ curl -sS \
 
 当宿主机打开了 continuous research mode：
 
-- `NO_FURTHER_TASKS` 不再表示停机
-- 它会触发新的 prompt，要求 agent：
-  - 先完成当前 proposal/history 的最小必要写回
-  - 吃干当前回合还能直接吸收的本地分析与规划
-  - 只有真正需要长任务时再开始下一轮实验
-
-真正停机只认：
-
-- `STOP_AUTOMATION`
-- `END_EXPERIMENT`
+- `TASKBOARD_SIGNAL=WAITING_ON_ASYNC` 表示当前已有 live task，taskboard 只负责托管并按节奏提醒 agent 回来确认实验没有卡住；
+- `TASKBOARD_SIGNAL=CLOSEOUT_READY` 表示 execution 已经明确写出“继续当前 proposal 没有新的信息收益”，taskboard 会进入 closeout；
+- `TASKBOARD_SIGNAL=none` 表示当前 closeout 已完成，taskboard 会继续引导下一轮 planning。
 
 ## 7. 辅助进程和 proposal 的关系
 

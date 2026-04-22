@@ -31,6 +31,13 @@ def continuous_research_mode_path(config: Any, *, hooks: AutomationStateHooks) -
     return Path(config.app_home) / hooks.continuous_research_mode_filename
 
 
+def _normalize_automation_mode(value: Any, *, enabled: bool) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"continuous", "managed"}:
+        return mode
+    return "continuous" if enabled else "managed"
+
+
 def normalize_continuous_research_mode_payload(payload: Any, *, hooks: AutomationStateHooks) -> dict[str, Any]:
     raw = payload if isinstance(payload, dict) else {}
     sessions_raw = raw.get("sessions", {})
@@ -41,8 +48,10 @@ def normalize_continuous_research_mode_payload(payload: Any, *, hooks: Automatio
             if not session_id:
                 continue
             state = raw_state if isinstance(raw_state, dict) else {}
+            enabled = hooks.parse_boolish(state.get("enabled", False), default=False)
             sessions[session_id] = {
-                "enabled": hooks.parse_boolish(state.get("enabled", False), default=False),
+                "enabled": enabled,
+                "mode": _normalize_automation_mode(state.get("mode", ""), enabled=enabled),
                 "updated_at": str(state.get("updated_at", "")),
                 "updated_by": str(state.get("updated_by", "")),
                 "source": str(state.get("source", "")),
@@ -52,6 +61,7 @@ def normalize_continuous_research_mode_payload(payload: Any, *, hooks: Automatio
                 "waiting_evidence_token": str(state.get("waiting_evidence_token", "")),
                 "last_evidence_token": str(state.get("last_evidence_token", "")),
                 "stable_idle_repeat_count": max(0, int(state.get("stable_idle_repeat_count", 0) or 0)),
+                "research_phase": str(state.get("research_phase", "")),
                 "last_signal": str(state.get("last_signal", "")),
                 "next_action_hash": str(state.get("next_action_hash", "")),
                 "next_action_text": str(state.get("next_action_text", "")),
@@ -103,8 +113,10 @@ def load_continuous_research_mode(config: Any, *, hooks: AutomationStateHooks, c
         enabled = bool(payload.get("enabled_sessions"))
     else:
         enabled = bool(payload.get("legacy_enabled", False))
+    mode = _normalize_automation_mode(target_state.get("mode", "") if target_state else "", enabled=enabled)
     return {
         "enabled": enabled,
+        "mode": mode,
         "target_codex_session_id": target_session_id,
         "target_session_state": target_state,
         "legacy_enabled": bool(payload.get("legacy_enabled", False)),
@@ -218,6 +230,7 @@ def update_continuous_research_session_state(
     state.update(
         {
             "enabled": bool(state.get("enabled", False)),
+            "mode": _normalize_automation_mode(state.get("mode", ""), enabled=bool(state.get("enabled", False))),
             "updated_at": hooks.utc_now(),
             "updated_by": str(updated_by or "followup"),
             "source": str(source or "session-state-update"),
@@ -341,6 +354,7 @@ def set_continuous_research_mode(
         session_state.update(
             {
                 "enabled": bool(enabled),
+                "mode": "continuous" if bool(enabled) else "managed",
                 "updated_at": timestamp,
                 "updated_by": str(updated_by or "cli"),
                 "source": str(source or "manual"),
@@ -512,8 +526,7 @@ def should_override_stop_signal_with_continuous_research(
 
 def continuous_research_mode_label(config: Any, *, hooks: AutomationStateHooks) -> str:
     payload = load_continuous_research_mode(config, hooks=hooks)
-    enabled = bool(payload.get("enabled", False) or payload.get("enabled_sessions") or payload.get("legacy_enabled", False))
-    return "on" if enabled else "off"
+    return "continuous" if str(payload.get("mode", "")).strip() == "continuous" else "managed"
 
 
 def continuous_research_enabled_session_ids(config: Any, *, hooks: AutomationStateHooks) -> list[str]:
@@ -533,6 +546,77 @@ def continuous_research_enabled_session_ids(config: Any, *, hooks: AutomationSta
     if target_session_id and bool(loaded.get("enabled", False)):
         return [target_session_id]
     return []
+
+
+def automation_mode(config: Any, *, hooks: AutomationStateHooks, codex_session_id: str = "") -> dict[str, Any]:
+    payload = load_continuous_research_mode(config, hooks=hooks, codex_session_id=codex_session_id)
+    target_state = payload.get("target_session_state", {}) if isinstance(payload.get("target_session_state", {}), dict) else {}
+    mode = _normalize_automation_mode(target_state.get("mode", ""), enabled=bool(payload.get("enabled", False)))
+    return {
+        **payload,
+        "mode": mode,
+        "target_session_state": (
+            {
+                **target_state,
+                "mode": mode,
+                "enabled": bool(payload.get("enabled", False)),
+            }
+            if target_state
+            else {}
+        ),
+    }
+
+
+def automation_mode_label(config: Any, *, hooks: AutomationStateHooks, codex_session_id: str = "") -> str:
+    return str(automation_mode(config, hooks=hooks, codex_session_id=codex_session_id).get("mode", "managed"))
+
+
+def automation_mode_is_managed(config: Any, *, hooks: AutomationStateHooks, codex_session_id: str = "") -> bool:
+    payload = automation_mode(config, hooks=hooks, codex_session_id=codex_session_id)
+    target_state = payload.get("target_session_state", {}) if isinstance(payload.get("target_session_state", {}), dict) else {}
+    if not target_state:
+        return False
+    return str(payload.get("mode", "")).strip() == "managed"
+
+
+def set_automation_mode(
+    config: Any,
+    *,
+    hooks: AutomationStateHooks,
+    mode: str,
+    codex_session_id: str = "",
+    updated_by: str = "cli",
+    source: str = "",
+) -> dict[str, Any]:
+    normalized_mode = _normalize_automation_mode(mode, enabled=(str(mode).strip().lower() == "continuous"))
+    return set_continuous_research_mode(
+        config,
+        hooks=hooks,
+        enabled=normalized_mode == "continuous",
+        codex_session_id=codex_session_id,
+        updated_by=updated_by,
+        source=source or f"automation-mode:{normalized_mode}",
+    )
+
+
+def toggle_automation_mode(
+    config: Any,
+    *,
+    hooks: AutomationStateHooks,
+    codex_session_id: str = "",
+    updated_by: str = "cli",
+    source: str = "",
+) -> dict[str, Any]:
+    current_mode = automation_mode_label(config, hooks=hooks, codex_session_id=codex_session_id)
+    target_mode = "managed" if current_mode == "continuous" else "continuous"
+    return set_automation_mode(
+        config,
+        hooks=hooks,
+        mode=target_mode,
+        codex_session_id=codex_session_id,
+        updated_by=updated_by,
+        source=source or "automation-mode:toggle",
+    )
 
 
 def human_guidance_mode_path(config: Any, *, hooks: AutomationStateHooks) -> Path:

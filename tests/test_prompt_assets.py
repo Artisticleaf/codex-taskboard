@@ -67,8 +67,8 @@ class PromptAssetTests(unittest.TestCase):
 
         prompt = build_resume_prompt(spec, event)
 
-        self.assertTrue(prompt.strip().endswith("FINAL_SIGNAL=LOCAL_CONTINUE_NO_WAKE|LOCAL_MICROSTEP_BATCH|ANALYZING_NEW_EVIDENCE|MATERIALS_READY_FOR_PROPOSAL|WAITING_ON_ASYNC|PARKED_IDLE|NO_FURTHER_TASKS|STOP_AUTOMATION|END_EXPERIMENT|NEW_TASKS_STARTED|none"))
-        footer_index = prompt.rfind("TASKBOARD_PROTOCOL_ACK=TBP1")
+        self.assertTrue(prompt.strip().endswith("LIVE_TASK_STATUS=none|submitted|awaiting"))
+        footer_index = prompt.rfind("TASKBOARD_SIGNAL=EXECUTION_READY|WAITING_ON_ASYNC|CLOSEOUT_READY|none")
         artifact_index = prompt.rfind("artifact_paths:")
         self.assertGreater(footer_index, artifact_index)
 
