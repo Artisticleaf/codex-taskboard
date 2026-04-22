@@ -984,7 +984,7 @@ def detect_research_stall_attention(event: dict[str, Any], spec: dict[str, Any])
         if ended_ts - submitted_ts >= queue_age_threshold:
             stale_queued_states.append(state)
 
-    signal_text = str(event.get("taskboard_signal", "")).strip().upper()
+    signal_text = canonicalize_taskboard_signal(str(event.get("taskboard_signal", "")).strip().upper())
     if signal_text in STOP_FOLLOWUP_SIGNALS | CONTINUOUS_RESEARCH_OVERRIDE_SIGNALS:
         closeout_materialized = False
         if closeout_dir and closeout_dir.exists():
