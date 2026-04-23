@@ -8742,9 +8742,13 @@ def build_continuous_planning_prompt(
         [
             "",
             (
-                f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
-                if normalized_trigger_signal
-                else "当前要把精力放在复审继承边界、刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+                "当前要把精力放在复审继承边界、刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+                if successor_bootstrap and normalized_trigger_signal == "none"
+                else (
+                    f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
+                    if normalized_trigger_signal
+                    else "当前要把精力放在复审继承边界、刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+                )
             ),
         ]
     )

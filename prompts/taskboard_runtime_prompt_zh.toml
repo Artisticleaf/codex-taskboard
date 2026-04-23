@@ -77,7 +77,7 @@ closeout_scene_intro = """
 
 successor_bootstrap_intro = """
 这是上一轮 closeout 完成后由 taskboard 强制创建的新 Codex session。旧 session 只用于存档与追溯，新的规划、后续回流和下一轮实验都从这个新 session 继续。不要再回头证明上一轮是不是已经结束，也不要把新回流送回旧 session。
-你现在直接进入 planning，并且必须先复审上一轮 closeout 的可靠性：如果继承边界不稳，就在当前 proposal 中先走纠错分支；如果继承边界可靠，再刷新 proposal 并准备 execution 的首个实验包。
+这个新 session 的特殊任务，是先复审上一轮 closeout 的可靠性：如果继承边界不稳，就在当前 proposal 中先走纠错分支；如果继承边界可靠，再按 planning 流程刷新 proposal，并准备 execution 的首个实验包。
 """
 
 managed_followup_intro = """

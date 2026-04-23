@@ -196,7 +196,7 @@ class FollowupTests(unittest.TestCase):
 
         self.assertIn("强制创建的新 Codex session", prompt)
         self.assertIn("上一轮已收口的 session", prompt)
-        self.assertIn("必须先复审上一轮 closeout 的可靠性", prompt)
+        self.assertIn("这个新 session 的特殊任务，是先复审上一轮 closeout 的可靠性", prompt)
 
     def test_managed_mode_only_becomes_active_after_explicit_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
