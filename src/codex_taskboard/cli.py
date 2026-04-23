@@ -66,10 +66,8 @@ from codex_taskboard.automation_state import (
     human_guidance_retry_after_seconds as human_guidance_retry_after_seconds_impl,
     load_continuous_research_mode as load_continuous_research_mode_impl,
     load_human_guidance_mode as load_human_guidance_mode_impl,
-    next_parked_idle_repeat_count as next_parked_idle_repeat_count_impl,
     normalize_continuous_research_mode_payload as normalize_continuous_research_mode_payload_impl,
     normalize_human_guidance_mode_payload as normalize_human_guidance_mode_payload_impl,
-    park_continuous_research_session as park_continuous_research_session_impl,
     resolve_continuous_research_target_session_id as resolve_continuous_research_target_session_id_impl,
     resolve_human_guidance_target_session_id as resolve_human_guidance_target_session_id_impl,
     set_automation_mode as set_automation_mode_impl,
@@ -336,9 +334,6 @@ DEFAULT_SESSION_OUTPUT_BUSY_RETRY_SECONDS = 30
 DEFAULT_SESSION_OUTPUT_BUSY_ACTIVITY_SECONDS = 20
 DEFAULT_SESSION_OUTPUT_BUSY_OPEN_TURN_STALL_SECONDS = 300
 MAX_ROLLOUT_OUTPUT_BUSY_TAIL_LINES = 2048
-DEFAULT_LOCAL_MICROSTEP_DELAY_SECONDS = 60
-DEFAULT_LOCAL_MICROSTEP_INTERVAL_SECONDS = 180
-DEFAULT_LOCAL_MICROSTEP_MIN_IDLE_SECONDS = 60
 DEFAULT_WAITING_ON_ASYNC_DELAY_SECONDS = 60 * 60
 DEFAULT_WAITING_ON_ASYNC_INTERVAL_SECONDS = 60 * 60
 DEFAULT_WAITING_ON_ASYNC_MIN_IDLE_SECONDS = 300
@@ -382,20 +377,15 @@ EXECUTION_READY_SIGNAL = "EXECUTION_READY"
 CLOSEOUT_READY_SIGNAL = "CLOSEOUT_READY"
 CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL = EXECUTION_READY_SIGNAL
 CONTINUOUS_RESEARCH_OVERRIDE_SIGNALS = {CLOSEOUT_READY_SIGNAL}
-CONTINUOUS_RESEARCH_REASON = "continuous_research_after_no_further_tasks"
+CONTINUOUS_RESEARCH_REASON = "continuous_research_resume"
 CONTINUOUS_RESEARCH_IDLE_REASON = "continuous_research_session_idle"
-CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON = "continuous_research_stall_recovery"
 CONTINUOUS_RESEARCH_NEXT_ACTION_REASON = "continuous_research_next_bounded_action"
 CONTINUOUS_RESEARCH_TRANSITION_REASON = "continuous_research_closeout_transition"
-PROPOSAL_MATERIALIZATION_REASON = "proposal_materialization"
 CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE = "continuous_session_reminder"
 CONTINUOUS_RESEARCH_TRANSITION_FOLLOWUP_TYPE = "continuous_research_closeout_transition"
 DEFAULT_CONTINUOUS_RESEARCH_DELAY_SECONDS = 60
 DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS = 300
 DEFAULT_CONTINUOUS_RESEARCH_MIN_IDLE_SECONDS = 180
-DEFAULT_CONTINUOUS_RESEARCH_INITIAL_PARKED_RECHECK_SECONDS = 60
-DEFAULT_CONTINUOUS_RESEARCH_PARKED_REMINDER_SECONDS = 15 * 60
-MAX_CONTINUOUS_RESEARCH_PARKED_REMINDER_SECONDS = 8 * 60 * 60
 MAX_RECENT_PROJECT_HISTORY_LOG_SCAN_FILES = 5
 MAX_RECENT_PROJECT_HISTORY_LOG_CHARS = 24000
 MAX_RECENT_NEXT_ACTION_AGE_SECONDS = 3 * 24 * 60 * 60
@@ -443,18 +433,6 @@ DIRECT_LOCAL_ARTIFACT_KEYWORDS = (
     "物化配置",
     "launch spec materialization",
     "config 物化",
-)
-PARKED_REAFFIRMATION_KEYWORDS = (
-    "PARKED_IDLE",
-    "保持 parked",
-    "继续 parked",
-    "进入 parked",
-    "转入 parked",
-    "进入静默等待",
-    "保持 route-1 parked",
-    "继续保持 parked",
-    "waiting for new evidence",
-    "waiting for external evidence",
 )
 RATE_LIMIT_PATTERNS = [
     "exceeded retry limit",
@@ -584,20 +562,12 @@ MANUAL_DECISION_GATE_KEYWORDS = (
 )
 SUCCESS_TASKBOARD_SIGNALS = {"TASK_DONE", "START_NEXT_TASK"}
 STOP_FOLLOWUP_SIGNALS = {CLOSEOUT_READY_SIGNAL, "STOP_AUTOMATION"}
-LOCAL_MICROSTEP_BATCH_SIGNAL = "LOCAL_MICROSTEP_BATCH"
-LOCAL_CONTINUE_NO_WAKE_SIGNAL = "LOCAL_CONTINUE_NO_WAKE"
 WAITING_ON_ASYNC_SIGNAL = "WAITING_ON_ASYNC"
-WAITING_ON_LIVE_TASK_SIGNAL = "WAITING_ON_LIVE_TASK"
 WAITING_ON_FEEDBACK_SIGNAL = "WAITING_ON_FEEDBACK"
-PARKED_IDLE_SIGNAL = "PARKED_IDLE"
-ANALYZING_NEW_EVIDENCE_SIGNAL = "ANALYZING_NEW_EVIDENCE"
-MATERIALS_READY_FOR_PROPOSAL_SIGNAL = "MATERIALS_READY_FOR_PROPOSAL"
 TASKBOARD_RESEARCH_PHASE_VALUES = {"planning", "execution", "closeout"}
 INLINE_CONTINUE_SIGNALS = {EXECUTION_READY_SIGNAL}
-LOCAL_MICROSTEP_BATCH_SIGNALS = {EXECUTION_READY_SIGNAL}
-WAITING_ON_ASYNC_SIGNALS = {WAITING_ON_ASYNC_SIGNAL, WAITING_ON_LIVE_TASK_SIGNAL}
-PARKED_IDLE_SIGNALS = {PARKED_IDLE_SIGNAL}
-SESSION_PROGRESS_SIGNALS = LOCAL_MICROSTEP_BATCH_SIGNALS | INLINE_CONTINUE_SIGNALS | WAITING_ON_ASYNC_SIGNALS
+WAITING_ON_ASYNC_SIGNALS = {WAITING_ON_ASYNC_SIGNAL}
+SESSION_PROGRESS_SIGNALS = INLINE_CONTINUE_SIGNALS | WAITING_ON_ASYNC_SIGNALS
 TASKBOARD_LIVE_TASK_STATUS_VALUES = {"none", "submitted", "awaiting"}
 TASKBOARD_PUBLIC_SIGNAL_VALUES = {
     EXECUTION_READY_SIGNAL,
@@ -605,25 +575,13 @@ TASKBOARD_PUBLIC_SIGNAL_VALUES = {
     CLOSEOUT_READY_SIGNAL,
     "none",
 }
-TASKBOARD_LEGACY_SIGNAL_VALUES = {
-    LOCAL_CONTINUE_NO_WAKE_SIGNAL,
-    LOCAL_MICROSTEP_BATCH_SIGNAL,
-    MATERIALS_READY_FOR_PROPOSAL_SIGNAL,
-    ANALYZING_NEW_EVIDENCE_SIGNAL,
-    WAITING_ON_LIVE_TASK_SIGNAL,
-    PARKED_IDLE_SIGNAL,
-    "NO_FURTHER_TASKS",
-    "END_EXPERIMENT",
-    "NEW_TASKS_STARTED",
-}
-TASKBOARD_SIGNAL_VALUES = TASKBOARD_PUBLIC_SIGNAL_VALUES | TASKBOARD_LEGACY_SIGNAL_VALUES | SUCCESS_TASKBOARD_SIGNALS | {"STOP_AUTOMATION"}
+TASKBOARD_SIGNAL_VALUES = TASKBOARD_PUBLIC_SIGNAL_VALUES | SUCCESS_TASKBOARD_SIGNALS | {"STOP_AUTOMATION"}
 CANONICAL_HEAD_CONTRACT_VERSION = "CH1"
 CANONICAL_HEAD_BEGIN_MARKER = "TASKBOARD_CANONICAL_HEAD_BEGIN"
 CANONICAL_HEAD_END_MARKER = "TASKBOARD_CANONICAL_HEAD_END"
 CANONICAL_HEAD_SCAN_CHARS = 8192
 CANONICAL_HEAD_REQUIRED_KEYS = ("BIG_MAINLINE", "SMALL_MAINLINE", "CURRENT_BOUNDARY", "NEXT_STEP")
 CANONICAL_HEAD_OPTIONAL_KEYS = ("KEY_EVIDENCE", "MILESTONE")
-LOCAL_MICROSTEP_BATCH_REASON = "execution_reentry"
 WAITING_ON_ASYNC_REASON = "waiting_on_async_watchdog"
 PROTOCOL_SELF_CHECK_REPAIR_REASON = "protocol_self_check_repair"
 PROTOCOL_SELF_CHECK_REPAIR_FOLLOWUP_TYPE = "protocol_self_check_repair"
@@ -631,24 +589,12 @@ DEFAULT_PROTOCOL_REPAIR_DELAY_SECONDS = 20
 DEFAULT_PROTOCOL_REPAIR_INTERVAL_SECONDS = 180
 DEFAULT_PROTOCOL_REPAIR_MIN_IDLE_SECONDS = 30
 
-LEGACY_TASKBOARD_SIGNAL_ALIASES = {
-    WAITING_ON_LIVE_TASK_SIGNAL: WAITING_ON_ASYNC_SIGNAL,
-    ANALYZING_NEW_EVIDENCE_SIGNAL: EXECUTION_READY_SIGNAL,
-    LOCAL_CONTINUE_NO_WAKE_SIGNAL: EXECUTION_READY_SIGNAL,
-    LOCAL_MICROSTEP_BATCH_SIGNAL: EXECUTION_READY_SIGNAL,
-    MATERIALS_READY_FOR_PROPOSAL_SIGNAL: EXECUTION_READY_SIGNAL,
-    "NEW_TASKS_STARTED": EXECUTION_READY_SIGNAL,
-    "NO_FURTHER_TASKS": CLOSEOUT_READY_SIGNAL,
-    "END_EXPERIMENT": CLOSEOUT_READY_SIGNAL,
-    PARKED_IDLE_SIGNAL: "none",
-}
-
 
 def canonicalize_taskboard_signal(signal: str) -> str:
     normalized_signal = str(signal or "").strip()
     if not normalized_signal:
         return ""
-    return LEGACY_TASKBOARD_SIGNAL_ALIASES.get(normalized_signal, normalized_signal)
+    return normalized_signal
 
 
 def infer_taskboard_research_phase(
@@ -1483,8 +1429,6 @@ def empty_continuation_hint() -> dict[str, Any]:
         "direct_local_artifact_reason": "",
         "dispatch_ready": False,
         "dispatch_ready_reason": "",
-        "parked_reaffirmation": False,
-        "parked_reaffirmation_reason": "",
         "collect_local_evidence": False,
         "collect_local_evidence_reason": "",
         "source_kind": "",
@@ -1585,14 +1529,6 @@ def parse_project_history_next_action_from_text(text: str) -> dict[str, Any]:
         (
             token
             for token in DIRECT_LOCAL_ARTIFACT_KEYWORDS
-            if token in context_text or token.lower() in lowered_context
-        ),
-        "",
-    )
-    parked_reaffirmation_reason = next(
-        (
-            token
-            for token in PARKED_REAFFIRMATION_KEYWORDS
             if token in context_text or token.lower() in lowered_context
         ),
         "",
@@ -1710,7 +1646,6 @@ def parse_project_history_next_action_from_text(text: str) -> dict[str, Any]:
                 lowered_context,
                 (
                     "live task",
-                    "WAITING_ON_LIVE_TASK",
                     "submitted",
                     "awaiting",
                     "提交 live task",
@@ -1794,14 +1729,11 @@ def parse_project_history_next_action_from_text(text: str) -> dict[str, Any]:
     direct_local_artifact = bool(direct_local_artifact_reason) and not bool(
         requires_async or requires_gpu or requires_live_task or future_callback
     )
-    parked_reaffirmation = bool(parked_reaffirmation_reason) and not proposal_bootstrap and not bool(requires_async)
     action_text = " | ".join(normalized_action_lines)
     status = "missing"
     if action_text:
         if conflict:
             status = "conflict"
-        elif parked_reaffirmation:
-            status = "parked"
         elif dispatch_ready:
             status = "dispatch_ready"
         elif requires_async:
@@ -1822,7 +1754,6 @@ def parse_project_history_next_action_from_text(text: str) -> dict[str, Any]:
                     "proposal_bootstrap": bool(proposal_bootstrap),
                     "direct_local_artifact": bool(direct_local_artifact),
                     "dispatch_ready": bool(dispatch_ready),
-                    "parked_reaffirmation": bool(parked_reaffirmation),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -1844,8 +1775,6 @@ def parse_project_history_next_action_from_text(text: str) -> dict[str, Any]:
         "direct_local_artifact_reason": direct_local_artifact_reason,
         "dispatch_ready": bool(dispatch_ready),
         "dispatch_ready_reason": dispatch_ready_reason,
-        "parked_reaffirmation": bool(parked_reaffirmation),
-        "parked_reaffirmation_reason": parked_reaffirmation_reason,
         "parser": "section" if section_lines else ("structured" if explicit_action_lines else "none"),
     }
 
@@ -2068,8 +1997,6 @@ def recent_local_evidence_sweep_hint(
         "dispatch_ready_reason": "",
         "direct_local_artifact": False,
         "direct_local_artifact_reason": "",
-        "parked_reaffirmation": False,
-        "parked_reaffirmation_reason": "",
         "receipt_event_path": last_event_path,
         "receipt_feedback_data_path": feedback_data_path,
         "receipt_command_log_path": command_log_path,
@@ -2147,8 +2074,6 @@ def recent_project_history_next_action_prompt_lines(spec: dict[str, Any]) -> lis
         lines.append(f"- dispatch_ready: true ({hint.get('dispatch_ready_reason', '')})")
     if bool(hint.get("collect_local_evidence", False)):
         lines.append(f"- collect_local_evidence: true ({hint.get('collect_local_evidence_reason', '')})")
-    if bool(hint.get("parked_reaffirmation", False)):
-        lines.append(f"- parked_reaffirmation: true ({hint.get('parked_reaffirmation_reason', '')})")
     if hint.get("source_path"):
         lines.append(f"- source_log: {prompt_path_marker(hint.get('source_path', ''))}")
     if hint.get("source_updated_at"):
@@ -2195,8 +2120,6 @@ def proposal_dispatch_ready_for_session(
     session_state: dict[str, Any],
     next_action_hint: dict[str, Any] | None = None,
 ) -> bool:
-    if str(session_state.get("last_signal", "")).strip() == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
-        return True
     return bool((next_action_hint or {}).get("dispatch_ready", False))
 
 
@@ -2785,14 +2708,8 @@ def compact_proposal_feedback_instruction_lines(spec: dict[str, Any]) -> list[st
         lines.append(f"project_history_log_dir: {prompt_path_marker(project_history_log_dir)}")
     if proposal_path:
         lines.append("当前 proposal 以上面的 proposal_file 为准。")
-        if project_history_file:
-            lines.append(
-                "本轮可靠结果、关键诊断结论和下一步明确动作默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。"
-            )
-        else:
-            lines.append("本轮可靠结果、关键诊断结论和下一步明确动作默认写回当前 proposal。")
-    elif project_history_file:
-        lines.append("当前至少先把可靠结果、关键诊断结论和下一步明确动作写进当前历史链路。")
+    if project_history_file:
+        lines.append("当前 history 以上面的 project_history_file 为准。")
     return lines
 
 
@@ -2820,11 +2737,6 @@ def proposal_manual_decision_gate_hints(spec: dict[str, Any], *, max_hints: int 
         if len(hints) >= max_hints:
             break
     return hints
-
-
-def evidence_first_loop_lines(*, compact: bool = True) -> list[str]:
-    del compact
-    return prompt_block_lines("evidence_first")
 
 
 def execution_repeat_guard_lines(spec: dict[str, Any], next_action_hint: dict[str, Any]) -> list[str]:
@@ -2870,9 +2782,6 @@ def execution_followthrough_instruction_lines(
     else:
         lines.append(
             f"- 如果本轮只剩等待受托管实验回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`；taskboard 会按 1 小时节奏提醒你回来确认实验仍在产出。"
-        )
-        lines.append(
-            f"- 只有在你已经重读 proposal/history 与本轮证据，并且明确写出“剩余本地动作已不足以改变结论边界、关键风险判断或实验就绪度，因此继续当前 proposal 已无足够信息增益”的分析后，才允许输出 `TASKBOARD_SIGNAL={CLOSEOUT_READY_SIGNAL}`。"
         )
     return lines
 
@@ -2944,7 +2853,8 @@ def followup_has_continuous_research_origin(followup: dict[str, Any]) -> bool:
     return followup_type == CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE or reason in {
         CONTINUOUS_RESEARCH_REASON,
         CONTINUOUS_RESEARCH_IDLE_REASON,
-        CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON,
+        CONTINUOUS_RESEARCH_NEXT_ACTION_REASON,
+        WAITING_ON_ASYNC_REASON,
     }
 
 
@@ -2984,47 +2894,6 @@ def execution_autowake_enabled_for_spec(
     if not normalized_session_id:
         return False
     return continuous_research_mode_enabled(config, codex_session_id=normalized_session_id)
-
-
-def schedule_local_microstep_followup(
-    config: AppConfig,
-    *,
-    task_id: str,
-    spec: dict[str, Any],
-    followup: dict[str, Any] | None = None,
-) -> bool:
-    if not execution_autowake_enabled_for_spec(config, spec=spec):
-        return False
-    if followup is not None and str(followup.get("followup_type", "")).strip() != "queued_feedback_resume":
-        keep_followup_type = str(followup.get("followup_type", "")).strip() == CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE
-        reschedule_existing_followup(
-            config,
-            followup,
-            reason=LOCAL_MICROSTEP_BATCH_REASON,
-            delay_seconds=DEFAULT_LOCAL_MICROSTEP_DELAY_SECONDS,
-            interval_seconds=DEFAULT_LOCAL_MICROSTEP_INTERVAL_SECONDS,
-            min_idle_seconds=DEFAULT_LOCAL_MICROSTEP_MIN_IDLE_SECONDS,
-            keep_followup_type=keep_followup_type,
-            continuous_research_origin=followup_has_continuous_research_origin(followup),
-        )
-        merge_task_state(
-            config,
-            task_id,
-            followup_status="scheduled",
-            followup_last_action=f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}",
-            followup_stopped_at="",
-        )
-        return True
-    schedule_followup(
-        config,
-        task_id=task_id,
-        spec=spec,
-        reason=LOCAL_MICROSTEP_BATCH_REASON,
-        delay_seconds=DEFAULT_LOCAL_MICROSTEP_DELAY_SECONDS,
-        interval_seconds=DEFAULT_LOCAL_MICROSTEP_INTERVAL_SECONDS,
-        min_idle_seconds=DEFAULT_LOCAL_MICROSTEP_MIN_IDLE_SECONDS,
-    )
-    return True
 
 
 def schedule_waiting_on_async_watchdog(
@@ -3345,8 +3214,6 @@ def automation_state_hooks() -> AutomationStateHooks:
         default_human_guidance_lease_seconds=DEFAULT_HUMAN_GUIDANCE_LEASE_SECONDS,
         continuous_research_idle_loop_threshold=CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD,
         continuous_research_override_signals=CONTINUOUS_RESEARCH_OVERRIDE_SIGNALS,
-        parked_idle_signal=PARKED_IDLE_SIGNAL,
-        parked_idle_signals=PARKED_IDLE_SIGNALS,
     )
 
 
@@ -3439,46 +3306,6 @@ def clear_continuous_research_session_waiting_state(
         updated_by=updated_by,
         source=source,
         **updates,
-    )
-
-
-def park_continuous_research_session(
-    config: AppConfig,
-    *,
-    codex_session_id: str,
-    waiting_state: str,
-    waiting_reason: str,
-    evidence_token: str,
-    last_signal: str,
-    stable_idle_repeat_count: int = CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD,
-    updated_by: str = "followup",
-    source: str = "",
-    **updates: Any,
-) -> dict[str, Any]:
-    return park_continuous_research_session_impl(
-        config,
-        hooks=automation_state_hooks(),
-        codex_session_id=codex_session_id,
-        waiting_state=waiting_state,
-        waiting_reason=waiting_reason,
-        evidence_token=evidence_token,
-        last_signal=last_signal,
-        stable_idle_repeat_count=stable_idle_repeat_count,
-        updated_by=updated_by,
-        source=source,
-        **updates,
-    )
-
-
-def next_parked_idle_repeat_count(
-    session_state: dict[str, Any],
-    *,
-    evidence_token: str,
-) -> int:
-    return next_parked_idle_repeat_count_impl(
-        session_state,
-        hooks=automation_state_hooks(),
-        evidence_token=evidence_token,
     )
 
 
@@ -5199,13 +5026,6 @@ def extract_taskboard_signal(text: str) -> str:
     return extract_taskboard_signal_impl(text, hooks=session_runtime_hooks())
 
 
-def taskboard_light_research_brief_lines(*, continuous_mode: bool) -> list[str]:
-    lines = prompt_block_lines("light_research_agreement")
-    if continuous_mode:
-        lines = [*prompt_block_lines("continuous_intro"), *lines]
-    return lines
-
-
 def taskboard_footer_contract_lines() -> list[str]:
     return [
         "回复末尾请单独补一组自检行：",
@@ -5220,8 +5040,8 @@ def compact_research_governance_header_lines(
     *,
     continuous_mode: bool,
 ) -> list[str]:
+    del continuous_mode
     lines: list[str] = []
-    lines.extend(taskboard_light_research_brief_lines(continuous_mode=continuous_mode))
     lines.extend(proposal_feedback_instruction_lines(spec, profile=PROMPT_PROFILE_RESUME_COMPACT))
     return lines
 
@@ -5242,8 +5062,7 @@ def compact_context_sections(
     lines: list[str] = []
     if include_canonical_head:
         lines.extend(runtime_canonical_head_prompt_lines(spec))
-    if include_evidence_first:
-        lines.extend(evidence_first_loop_lines(compact=True))
+    del include_evidence_first
     if include_footer:
         lines.extend(taskboard_footer_contract_lines())
     return lines
@@ -5606,41 +5425,6 @@ def schedule_continuous_session_reminder(
         followup_key_override=continuous_session_followup_key_for(normalized_session_id),
         followup_type=CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE,
         last_signal=last_signal,
-    )
-
-
-def should_schedule_immediate_parked_watchdog(
-    config: AppConfig,
-    *,
-    session_id: str,
-    spec: dict[str, Any],
-    repeat_count: int,
-) -> bool:
-    if not session_id:
-        return False
-    if repeat_count > CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD:
-        return False
-    if not continuous_research_mode_enabled(config, codex_session_id=session_id):
-        return False
-    return should_schedule_followup_for_spec(spec)
-
-
-def schedule_immediate_parked_watchdog(
-    config: AppConfig,
-    *,
-    session_id: str,
-    spec: dict[str, Any],
-    signal_value: str,
-) -> None:
-    schedule_continuous_session_reminder(
-        config,
-        session_id=session_id,
-        spec=spec,
-        reason=CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON,
-        delay_seconds=0,
-        interval_seconds=DEFAULT_CONTINUOUS_RESEARCH_INITIAL_PARKED_RECHECK_SECONDS,
-        min_idle_seconds=0,
-        last_signal=signal_value,
     )
 
 
@@ -6023,142 +5807,6 @@ def recover_missing_queued_feedback_followups(config: AppConfig) -> list[dict[st
             }
         )
     return recovered
-
-
-def maybe_park_continuous_idle_loop(
-    config: AppConfig,
-    *,
-    followup: dict[str, Any],
-    spec_for_resume: dict[str, Any],
-    signal_value: str,
-    is_continuous_followup: bool,
-    is_continuous_session_reminder: bool,
-) -> tuple[bool, str, int]:
-    if not (is_continuous_followup or is_continuous_session_reminder):
-        return False, "", 0
-    session_id = str(followup.get("codex_session_id", "") or spec_for_resume.get("codex_session_id", "")).strip()
-    if not session_id:
-        return False, "", 0
-    evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec_for_resume)
-    session_state = continuous_research_session_state(config, session_id)
-    previous_token = str(session_state.get("last_evidence_token", "")).strip()
-    previous_count = max(0, int(session_state.get("stable_idle_repeat_count", 0) or 0))
-    next_action_hint = session_continuation_hint(config, session_id, spec=spec_for_resume)
-    next_action_hash = str(next_action_hint.get("action_hash", "")).strip()
-    previous_next_action_hash = str(session_state.get("next_action_hash", "")).strip()
-    previous_next_action_repeat_count = max(0, int(session_state.get("next_action_repeat_count", 0) or 0))
-    next_action_updates = {
-        "next_action_hash": next_action_hash,
-        "next_action_text": str(next_action_hint.get("action_text", "")),
-        "next_action_state": str(next_action_hint.get("status", "")),
-        "next_action_source_path": str(next_action_hint.get("source_path", "")),
-        "next_action_source_updated_at": str(next_action_hint.get("source_updated_at", "")),
-    }
-    if signal_value in PARKED_IDLE_SIGNALS:
-        clear_continuous_research_session_waiting_state(
-            config,
-            codex_session_id=session_id,
-            evidence_token=evidence_token,
-            last_signal=EXECUTION_READY_SIGNAL,
-            stable_idle_repeat_count=max(1, previous_count),
-            updated_by="followup",
-            source="continuous-idle-loop-ignore-legacy-parked",
-            next_action_repeat_count=max(1, previous_next_action_repeat_count),
-            **next_action_updates,
-        )
-        return False, evidence_token, max(1, previous_count)
-    if signal_value not in LOCAL_MICROSTEP_BATCH_SIGNALS:
-        clear_continuous_research_session_waiting_state(
-            config,
-            codex_session_id=session_id,
-            evidence_token=evidence_token,
-            last_signal=signal_value,
-            updated_by="followup",
-            source="continuous-idle-loop-reset",
-            next_action_hash="",
-            next_action_text="",
-            next_action_state="",
-            next_action_source_path="",
-            next_action_source_updated_at="",
-            next_action_repeat_count=0,
-        )
-        return False, evidence_token, 0
-    if bool(next_action_hint.get("controller_inherit_local", False)) and next_action_hash:
-        repeat_count = previous_next_action_repeat_count + 1 if next_action_hash == previous_next_action_hash else 1
-        clear_continuous_research_session_waiting_state(
-            config,
-            codex_session_id=session_id,
-            evidence_token=evidence_token,
-            last_signal=signal_value,
-            stable_idle_repeat_count=repeat_count,
-            updated_by="followup",
-            source="continuous-idle-loop-observed",
-            next_action_repeat_count=repeat_count,
-            **next_action_updates,
-        )
-        return False, evidence_token, repeat_count
-    repeat_count = previous_count + 1 if evidence_token and previous_token == evidence_token else 1
-    clear_continuous_research_session_waiting_state(
-        config,
-        codex_session_id=session_id,
-        evidence_token=evidence_token,
-        last_signal=signal_value,
-        stable_idle_repeat_count=repeat_count,
-        updated_by="followup",
-        source="continuous-idle-loop-observed",
-        next_action_repeat_count=0,
-        **next_action_updates,
-    )
-    return False, evidence_token, repeat_count
-
-
-def parked_waiting_signal_guard_details(
-    config: AppConfig,
-    *,
-    session_id: str,
-    spec: dict[str, Any],
-    followup_last_signal: str = "",
-    newer_async_task_exists: bool = False,
-) -> tuple[bool, str, str, int]:
-    normalized_session_id = str(session_id or "").strip()
-    if not normalized_session_id or newer_async_task_exists:
-        return False, "", "", 0
-    session_state = continuous_research_session_state(config, normalized_session_id)
-    parked_waiting_state = str(session_state.get("waiting_state", "")).strip()
-    if parked_waiting_state not in PARKED_IDLE_SIGNALS:
-        candidate_signal = str(followup_last_signal or session_state.get("last_signal", "")).strip()
-        parked_waiting_state = candidate_signal if candidate_signal in PARKED_IDLE_SIGNALS else ""
-    if parked_waiting_state not in PARKED_IDLE_SIGNALS:
-        return False, "", "", 0
-    if session_has_live_task(config, normalized_session_id):
-        return False, "", "", 0
-    evidence_token = continuous_research_session_evidence_token(config, normalized_session_id, spec=spec)
-    repeat_count = next_parked_idle_repeat_count(session_state, evidence_token=evidence_token)
-    return True, parked_waiting_state, evidence_token, repeat_count
-
-
-def guard_parked_waiting_signal_without_live_task(
-    config: AppConfig,
-    *,
-    session_id: str,
-    spec: dict[str, Any],
-    parked_waiting_state: str,
-    evidence_token: str,
-    repeat_count: int,
-    updated_by: str,
-    source: str,
-) -> None:
-    park_continuous_research_session(
-        config,
-        codex_session_id=session_id,
-        waiting_state=parked_waiting_state,
-        waiting_reason="guarded_invalid_waiting_signal_without_live_task",
-        evidence_token=evidence_token,
-        last_signal=parked_waiting_state,
-        stable_idle_repeat_count=repeat_count,
-        updated_by=updated_by,
-        source=source,
-    )
 
 
 def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list[dict[str, Any]]:
@@ -6748,126 +6396,6 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
             }
         )
         return processed
-    if signal_value in PARKED_IDLE_SIGNALS and result.get("ok", False):
-        session_id = str(followup.get("codex_session_id", "")).strip()
-        evidence_token = continuous_research_session_evidence_token(
-            config,
-            session_id,
-            spec=spec_for_resume,
-        )
-        repeat_count = CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD
-        immediate_watchdog_scheduled = False
-        if session_id:
-            session_state = continuous_research_session_state(config, session_id)
-            repeat_count = next_parked_idle_repeat_count(session_state, evidence_token=evidence_token)
-            park_continuous_research_session(
-                config,
-                codex_session_id=session_id,
-                waiting_state=signal_value,
-                waiting_reason="agent_requested_parked_idle",
-                evidence_token=evidence_token,
-                last_signal=signal_value,
-                stable_idle_repeat_count=repeat_count,
-                updated_by="followup",
-                source="followup-parked-idle",
-            )
-            if should_schedule_immediate_parked_watchdog(
-                config,
-                session_id=session_id,
-                spec=spec_for_resume,
-                repeat_count=repeat_count,
-            ):
-                schedule_immediate_parked_watchdog(
-                    config,
-                    session_id=session_id,
-                    spec=spec_for_resume,
-                    signal_value=signal_value,
-                )
-                immediate_watchdog_scheduled = True
-        if is_queued_feedback:
-            for queued_task_id in followup_task_ids(followup):
-                merge_task_state(
-                    config,
-                    queued_task_id,
-                    pending_feedback=False,
-                    notification_ok=result.get("ok", False),
-                    notification_signal=signal_value,
-                    resumed_session_id=result.get("resumed_session_id", followup.get("codex_session_id", "")),
-                    used_fallback_clone=result.get("used_fallback_clone", False),
-                    notification_finished_at=result.get("finished_at"),
-                    notification_summary={
-                        "ok": result.get("ok", False),
-                        "taskboard_signal": signal_value,
-                        "session_flow_state": "parked_idle",
-                        "waiting_evidence_token": evidence_token,
-                        "immediate_parked_watchdog_scheduled": immediate_watchdog_scheduled,
-                    },
-                    session_flow_state="parked_idle",
-                    followup_status="scheduled" if immediate_watchdog_scheduled else "resolved",
-                    followup_last_signal=signal_value,
-                    followup_last_action=(
-                        f"scheduled:{CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON}"
-                        if immediate_watchdog_scheduled
-                        else "resolved_parked_idle"
-                    ),
-                    followup_last_message_path=str(msg_path),
-                )
-            if live_task_present and session_id:
-                clear_continuous_research_session_waiting_state(
-                    config,
-                    codex_session_id=session_id,
-                    evidence_token=continuous_research_session_evidence_token(config, session_id, spec=spec_for_resume),
-                    last_signal=signal_value,
-                    updated_by="followup",
-                    source="followup-queued-feedback-waiting-on-async-live-task",
-                )
-            resolve_followup(config, followup_key)
-        else:
-            sync_followup_state(
-                config,
-                followup,
-                followup_status="scheduled" if immediate_watchdog_scheduled else "resolved",
-                followup_last_action=(
-                    f"scheduled:{CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON}"
-                    if immediate_watchdog_scheduled
-                    else "resolved_parked_idle"
-                ),
-                followup_last_signal=signal_value,
-                notification_signal=signal_value,
-                message_path=str(msg_path),
-            )
-            scheduled_on_same_followup = bool(
-                immediate_watchdog_scheduled
-                and is_continuous_session_reminder
-                and session_id
-                and followup_key == continuous_session_followup_key_for(session_id)
-            )
-            if not scheduled_on_same_followup:
-                resolve_followup(config, followup_key)
-            if task_id:
-                merge_task_state(
-                    config,
-                    task_id,
-                    session_flow_state="parked_idle",
-                    followup_status="scheduled" if immediate_watchdog_scheduled else "resolved",
-                    followup_last_signal=signal_value,
-                    followup_last_action=(
-                        f"scheduled:{CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON}"
-                        if immediate_watchdog_scheduled
-                        else "resolved_parked_idle"
-                    ),
-                    followup_last_message_path=str(msg_path),
-                    notification_signal=signal_value,
-                )
-        processed.append(
-            {
-                "followup_key": followup_key,
-                "action": "scheduled_immediate_parked_watchdog" if immediate_watchdog_scheduled else "resolved_parked_idle",
-                "signal": signal_value,
-                "waiting_evidence_token": evidence_token,
-            }
-        )
-        return processed
     if signal_value in STOP_FOLLOWUP_SIGNALS and not should_override_stop_signal_with_continuous_research(
         config,
         signal_value,
@@ -7123,280 +6651,6 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
             }
         )
         return processed
-    if signal_value in LOCAL_MICROSTEP_BATCH_SIGNALS and result.get("ok", False):
-        if signal_value == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
-            session_id = str(followup.get("codex_session_id", "")).strip()
-            evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec_for_resume) if session_id else ""
-            if session_id:
-                clear_continuous_research_session_waiting_state(
-                    config,
-                    codex_session_id=session_id,
-                    evidence_token=evidence_token,
-                    last_signal=signal_value,
-                    updated_by="followup",
-                    source=PROPOSAL_MATERIALIZATION_REASON,
-                )
-            if is_queued_feedback:
-                for queued_task_id in followup_task_ids(followup):
-                    merge_task_state(
-                        config,
-                        queued_task_id,
-                        research_phase="closeout",
-                        pending_feedback=False,
-                        notification_ok=result.get("ok", False),
-                        notification_signal=signal_value,
-                        resumed_session_id=result.get("resumed_session_id", followup.get("codex_session_id", "")),
-                        used_fallback_clone=result.get("used_fallback_clone", False),
-                        notification_finished_at=result.get("finished_at"),
-                        notification_summary={
-                            "ok": result.get("ok", False),
-                            "research_phase": "closeout",
-                            "taskboard_signal": signal_value,
-                            "session_flow_state": "proposal_materialization",
-                        },
-                        session_flow_state="proposal_materialization",
-                        followup_status="resolved",
-                        followup_last_signal=signal_value,
-                        followup_last_action="queued_feedback_delivered_proposal_materialization",
-                        followup_last_message_path=str(msg_path),
-                    )
-                if task_id and should_schedule_followup_for_spec(spec_for_resume):
-                    schedule_continuous_transition_followup(
-                        config,
-                        task_id=task_id,
-                        spec=spec_for_resume,
-                        trigger_signal=signal_value,
-                        message_path=str(msg_path),
-                    )
-                    merge_task_state(
-                        config,
-                        task_id,
-                        research_phase="closeout",
-                        session_flow_state="proposal_materialization",
-                        notification_signal=signal_value,
-                        followup_status="scheduled",
-                        followup_last_signal=signal_value,
-                        followup_last_action=f"scheduled:{CONTINUOUS_RESEARCH_TRANSITION_REASON}",
-                        followup_stopped_at="",
-                        followup_last_message_path=str(msg_path),
-                    )
-                resolve_followup(config, followup_key)
-                processed.append(
-                    {
-                        "followup_key": followup_key,
-                        "action": "queued_feedback_delivered_proposal_materialization",
-                        "queue_depth": entry_count,
-                        "signal": signal_value,
-                    }
-                )
-                return processed
-            if task_id and should_schedule_followup_for_spec(spec_for_resume):
-                schedule_continuous_transition_followup(
-                    config,
-                    task_id=task_id,
-                    spec=spec_for_resume,
-                    trigger_signal=signal_value,
-                    message_path=str(msg_path),
-                    followup=followup,
-                )
-                merge_task_state(
-                    config,
-                    task_id,
-                    research_phase="closeout",
-                    session_flow_state="proposal_materialization",
-                    notification_signal=signal_value,
-                    followup_status="scheduled",
-                    followup_last_signal=signal_value,
-                    followup_last_action=f"scheduled:{CONTINUOUS_RESEARCH_TRANSITION_REASON}",
-                    followup_stopped_at="",
-                    followup_last_message_path=str(msg_path),
-                )
-            processed.append(
-                {
-                    "followup_key": followup_key,
-                    "action": "proposal_materialization_followup_scheduled",
-                    "signal": signal_value,
-                }
-            )
-            return processed
-        if is_queued_feedback:
-            session_id = str(followup.get("codex_session_id", "")).strip()
-            evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec_for_resume) if session_id else ""
-            if session_id:
-                clear_continuous_research_session_waiting_state(
-                    config,
-                    codex_session_id=session_id,
-                    evidence_token=evidence_token,
-                    last_signal=signal_value,
-                    updated_by="followup",
-                    source="queued-feedback-waiting-on-async",
-                )
-            delivered_summary = {
-                "ok": result.get("ok", False),
-                "deferred": True,
-                "deferred_reason": str(followup.get("reason", "")),
-                "delivered_from_queue": True,
-                "queue_depth": entry_count,
-                "original_session_id": result.get("original_session_id"),
-                "resumed_session_id": result.get("resumed_session_id"),
-                "used_fallback_clone": result.get("used_fallback_clone", False),
-                "fallback_provider": result.get("fallback_provider", ""),
-                "taskboard_signal": signal_value,
-                "continue_attempts": result.get("continue_attempts", 0),
-                "recovered_with_continue": result.get("recovered_with_continue", False),
-                "session_flow_state": "local_active",
-            }
-            for queued_task_id in followup_task_ids(followup):
-                merge_task_state(
-                    config,
-                    queued_task_id,
-                    pending_feedback=False,
-                    notification_ok=result.get("ok", False),
-                    notification_signal=signal_value,
-                    resumed_session_id=result.get("resumed_session_id", followup.get("codex_session_id", "")),
-                    used_fallback_clone=result.get("used_fallback_clone", False),
-                    notification_finished_at=result.get("finished_at"),
-                    notification_summary=delivered_summary,
-                    session_flow_state="local_active",
-                    followup_status="resolved",
-                    followup_last_signal=signal_value,
-                    followup_last_action="queued_feedback_delivered_local_microstep",
-                    followup_last_message_path=str(msg_path),
-                )
-            local_followup_scheduled = False
-            if task_id and should_schedule_followup_for_spec(spec_for_resume):
-                local_followup_scheduled = schedule_local_microstep_followup(
-                    config,
-                    task_id=task_id,
-                    spec=spec_for_resume,
-                )
-                merge_task_state(
-                    config,
-                    task_id,
-                    session_flow_state="local_active",
-                    notification_signal=signal_value,
-                    followup_status="scheduled" if local_followup_scheduled else "resolved",
-                    followup_last_signal=signal_value,
-                    followup_last_action=(
-                        f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}"
-                        if local_followup_scheduled
-                        else "queued_feedback_delivered_local_microstep_no_autowake"
-                    ),
-                    followup_stopped_at="" if local_followup_scheduled else utc_now(),
-                    followup_last_message_path=str(msg_path),
-                )
-            resolve_followup(config, followup_key)
-            processed.append(
-                {
-                    "followup_key": followup_key,
-                    "action": (
-                        "queued_feedback_delivered_local_microstep"
-                        if local_followup_scheduled
-                        else "queued_feedback_delivered_local_microstep_no_autowake"
-                    ),
-                    "queue_depth": entry_count,
-                    "signal": signal_value,
-                }
-            )
-            return processed
-        should_park, evidence_token, repeat_count = maybe_park_continuous_idle_loop(
-            config,
-            followup=followup,
-            spec_for_resume=spec_for_resume,
-            signal_value=signal_value,
-            is_continuous_followup=is_continuous_followup,
-            is_continuous_session_reminder=is_continuous_session_reminder,
-        )
-        if should_park:
-            sync_followup_state(
-                config,
-                followup,
-                followup_status="resolved",
-                followup_last_action="resolved_parked_idle",
-                followup_last_signal=signal_value,
-                notification_signal=signal_value,
-                message_path=str(msg_path),
-            )
-            resolve_followup(config, followup_key)
-            if task_id:
-                merge_task_state(
-                    config,
-                    task_id,
-                    session_flow_state="parked_idle",
-                    followup_status="resolved",
-                    followup_last_signal=signal_value,
-                    followup_last_action="resolved_parked_idle",
-                    followup_last_message_path=str(msg_path),
-                    notification_signal=signal_value,
-                )
-            processed.append(
-                {
-                    "followup_key": followup_key,
-                    "action": "resolved_parked_idle",
-                    "signal": signal_value,
-                    "idle_repeat_count": repeat_count,
-                    "waiting_evidence_token": evidence_token,
-                }
-            )
-            return processed
-        local_followup_scheduled = False
-        if task_id:
-            local_followup_scheduled = schedule_local_microstep_followup(
-                config,
-                task_id=task_id,
-                spec=spec_for_resume,
-                followup=followup,
-            )
-        if not local_followup_scheduled:
-            sync_followup_state(
-                config,
-                followup,
-                followup_status="resolved",
-                followup_last_action="resolved_local_microstep_without_continuous",
-                followup_last_signal=signal_value,
-                notification_signal=signal_value,
-                message_path=str(msg_path),
-            )
-            resolve_followup(config, followup_key)
-            if task_id:
-                merge_task_state(
-                    config,
-                    task_id,
-                    session_flow_state="local_active",
-                    followup_status="resolved",
-                    followup_last_signal=signal_value,
-                    followup_last_action="resolved_local_microstep_without_continuous",
-                    followup_last_message_path=str(msg_path),
-                    notification_signal=signal_value,
-                )
-            processed.append(
-                {
-                    "followup_key": followup_key,
-                    "action": "resolved_local_microstep_without_continuous",
-                    "signal": signal_value,
-                }
-            )
-            return processed
-        if task_id:
-            merge_task_state(
-                config,
-                task_id,
-                session_flow_state="local_active",
-                notification_signal=signal_value,
-                followup_status="scheduled",
-                followup_last_signal=signal_value,
-                followup_last_action=f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}",
-                followup_stopped_at="",
-                followup_last_message_path=str(msg_path),
-            )
-        processed.append(
-            {
-                "followup_key": followup_key,
-                "action": "local_microstep_followup_scheduled",
-                "signal": signal_value,
-            }
-        )
-        return processed
     if signal_value in WAITING_ON_ASYNC_SIGNALS and result.get("ok", False):
         newer_async_task_exists = newer_task_exists(config, followup)
         session_id = str(followup.get("codex_session_id", "")).strip()
@@ -7405,75 +6659,6 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
             session_id=session_id,
             source_task_id=task_id,
         )
-        guarded_to_parked_idle = (
-            is_continuous_session_reminder
-            and session_id
-            and str(followup.get("last_signal", "")).strip() in PARKED_IDLE_SIGNALS
-        )
-        if guarded_to_parked_idle:
-            guard_enabled, parked_waiting_state, evidence_token, repeat_count = parked_waiting_signal_guard_details(
-                config,
-                session_id=session_id,
-                spec=spec_for_resume,
-                followup_last_signal=str(followup.get("last_signal", "")).strip(),
-                newer_async_task_exists=newer_async_task_exists,
-            )
-            if guard_enabled:
-                guard_parked_waiting_signal_without_live_task(
-                    config,
-                    session_id=session_id,
-                    spec=spec_for_resume,
-                    parked_waiting_state=parked_waiting_state,
-                    evidence_token=evidence_token,
-                    repeat_count=repeat_count,
-                    updated_by="followup",
-                    source="followup-guard-invalid-waiting-signal",
-                )
-                sync_followup_state(
-                    config,
-                    followup,
-                    followup_status="resolved",
-                    followup_last_action="guarded_invalid_waiting_signal_to_parked_idle",
-                    followup_last_signal=signal_value,
-                    notification_signal=signal_value,
-                    message_path=str(msg_path),
-                )
-                resolve_followup(config, followup_key)
-                if task_id:
-                    current_task_state = load_task_state(config, task_id)
-                    current_summary = (
-                        current_task_state.get("notification_summary", {})
-                        if isinstance(current_task_state.get("notification_summary", {}), dict)
-                        else {}
-                    )
-                    merge_task_state(
-                        config,
-                        task_id,
-                        session_flow_state="parked_idle",
-                        followup_status="resolved",
-                        followup_last_signal=signal_value,
-                        followup_last_action="guarded_invalid_waiting_signal_to_parked_idle",
-                        followup_last_message_path=str(msg_path),
-                        notification_signal=signal_value,
-                        notification_summary={
-                            **current_summary,
-                            "session_flow_state": "parked_idle",
-                            "taskboard_signal": signal_value,
-                            "guarded_invalid_waiting_signal": True,
-                            "guarded_to": parked_waiting_state,
-                            "waiting_evidence_token": evidence_token,
-                        },
-                    )
-                processed.append(
-                    {
-                        "followup_key": followup_key,
-                        "action": "guarded_invalid_waiting_signal_to_parked_idle",
-                        "signal": signal_value,
-                        "guarded_to": parked_waiting_state,
-                        "waiting_evidence_token": evidence_token,
-                    }
-                )
-                return processed
         if is_queued_feedback:
             delivered_summary = {
                 "ok": result.get("ok", False),
@@ -9448,76 +8633,25 @@ def build_default_resume_instruction(status: str) -> str:
 def build_standard_followup_prompt(spec: dict[str, Any], *, continuous_research_enabled: bool) -> str:
     if continuous_research_enabled:
         return build_continuous_research_prompt(spec)
-    prompt_lines = compact_research_governance_header_lines(
-        spec,
-        continuous_mode=False,
-    )
-    prompt_lines.extend(
-        [
-            "",
-            "这是一次 managed 模式的跟进提示。默认目标是把新增结果并回当前主线，继续推进当前上下文里能做完的工作；managed 只托管任务和 backlog，不会自动再把这段对话拆成额外短步骤。",
-        ]
-    )
+    prompt_lines = [*prompt_block_lines("managed_followup_intro")]
+    prompt_lines.extend(compact_research_governance_header_lines(spec, continuous_mode=False))
     prompt_lines.extend(runtime_canonical_head_prompt_lines(spec))
-    next_action_lines = recent_project_history_next_action_prompt_lines(spec)
-    if next_action_lines:
-        prompt_lines.append("")
-        prompt_lines.extend(next_action_lines)
-    prompt_lines.extend(["", *evidence_first_loop_lines()])
-    prompt_lines.extend(unified_execution_closure_lines())
-    prompt_lines.extend(
-        execution_followthrough_instruction_lines(
-            spec,
-            allow_no_further_tasks=True,
-            profile=PROMPT_PROFILE_RESUME_COMPACT,
-        )
-    )
+    prompt_lines.extend(execution_runtime_guidance_lines(spec, continuous_research_enabled=False))
     prompt_lines.extend(["", *taskboard_footer_contract_lines()])
     return join_prompt_lines(prompt_lines)
 
 
-def unified_execution_closure_lines() -> list[str]:
-    return [
-        "",
-        "这一轮默认使用统一 execution 上下文：结果回流吸收、代码和数据审计、局部修复、proposal/history 滚动写回、实验包准备与提交尽量在同一轮完成。",
-        "这一轮的收束目标只有两个：把实验包补到可提交，或者把 closeout 证据写扎实；不要把同一条思路无穷拆成更小的下一步。",
-        "本轮决策顺序：",
-        "1. 先吸收结果回流 / summary / report / log / 结果文件，提炼关键数字、异常点和它们意味着什么。",
-        "2. 只要结果、日志、参数、样本数、吞吐或显存异常，或者和 history、文献、官方推荐参数冲突，就先审代码、数据、配置、split 与运行完整性。",
-        "3. 当前上下文里能完成的局部修复、数据处理、smoke 前置和实验包补齐，直接在这一轮做完。",
-        "4. 把可靠结论、失败边界、关键诊断与下一步明确动作及时写回 proposal/history，写得让三天后的你和下一位 agent 都能看懂。",
-        "5. 如果实验包已经可执行、可审计，而且确实需要 GPU / remote / 长等待，就提交 taskboard 任务；如果剩余本地动作已不足以改变结论边界、关键风险判断或实验就绪度，就写清理由并准备 closeout。",
-    ]
-
-
-def build_unified_execution_prompt(
+def execution_runtime_guidance_lines(
     spec: dict[str, Any],
     *,
-    trigger_signal: str = "",
-    parked_origin: bool = False,
-) -> str:
-    del parked_origin
-    normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
+    continuous_research_enabled: bool,
+) -> list[str]:
     next_action_hint = controller_continuation_hint_from_spec(spec)
     manual_gate_hints = proposal_manual_decision_gate_hints(spec)
-    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
-    lines.extend(
-        [
-            "",
-            *prompt_block_lines("execution_scene_intro"),
-            "没有人工干预时，你需要比较几条备选路径，主动选择当前信息增益最高、且最能把这一轮推向明确出口的一步，并说明为什么这样选。",
-            (
-                f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
-                if normalized_trigger_signal
-                else "这是一次 continuous execution 跟进；优先把当前上下文里还能直接完成的分析、审计、修复和写回继续做深。"
-            ),
-        ]
-    )
-    lines.extend(runtime_canonical_head_prompt_lines(spec))
+    lines: list[str] = []
     next_action_lines = recent_project_history_next_action_prompt_lines(spec)
     if next_action_lines:
-        lines.append("")
-        lines.extend(next_action_lines)
+        lines.extend(["", *next_action_lines])
     if bool(next_action_hint.get("dispatch_ready", False)):
         lines.extend(
             [
@@ -9538,7 +8672,7 @@ def build_unified_execution_prompt(
         lines.extend(
             [
                 "",
-                "taskboard 读到的当前重点：最近还有结果文件或回流摘要没有被 proposal/history 吸收。请先把这批证据并回主线，再决定下一步。",
+                "taskboard 读到的当前重点：最近还有结果文件或回流摘要没有被当前 proposal 吸收。请先把这批证据并回 proposal，再决定下一步。",
                 f"- 线索: {next_action_hint.get('collect_local_evidence_reason', '')}",
             ]
         )
@@ -9553,20 +8687,40 @@ def build_unified_execution_prompt(
         )
         lines.extend([f"- {hint}" for hint in manual_gate_hints])
     lines.extend(execution_repeat_guard_lines(spec, next_action_hint))
-    lines.extend(unified_execution_closure_lines())
+    lines.extend(["", *prompt_block_lines("execution_core_rules")])
+    lines.extend(["", *prompt_block_lines("proposal_writing_requirements")])
     lines.extend(
         execution_followthrough_instruction_lines(
             spec,
-            allow_no_further_tasks=False,
+            allow_no_further_tasks=not continuous_research_enabled,
             profile=PROMPT_PROFILE_RESUME_COMPACT,
         )
     )
+    return lines
+
+
+def build_unified_execution_prompt(
+    spec: dict[str, Any],
+    *,
+    trigger_signal: str = "",
+) -> str:
+    normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
+    lines = [*prompt_block_lines("execution_scene_intro")]
+    lines.extend(compact_research_governance_header_lines(spec, continuous_mode=True))
+    lines.extend(
+        [
+            "",
+            (
+                f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
+                if normalized_trigger_signal
+                else "这是一次 continuous execution 跟进；优先把当前上下文里还能直接完成的分析、审计、修复和实验准备继续做深。"
+            ),
+        ]
+    )
+    lines.extend(runtime_canonical_head_prompt_lines(spec))
+    lines.extend(execution_runtime_guidance_lines(spec, continuous_research_enabled=True))
     lines.extend(["", *taskboard_footer_contract_lines()])
     return join_prompt_lines(lines)
-
-
-def build_parked_watchdog_prompt(spec: dict[str, Any], *, trigger_signal: str) -> str:
-    return build_unified_execution_prompt(spec, trigger_signal=trigger_signal)
 
 
 def build_continuous_planning_prompt(
@@ -9577,27 +8731,21 @@ def build_continuous_planning_prompt(
     predecessor_session_id: str = "",
 ) -> str:
     normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
-    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
+    lines = [*prompt_block_lines("planning_scene_intro")]
     if successor_bootstrap:
         lines.extend(["", *prompt_block_lines("successor_bootstrap_intro")])
         normalized_predecessor = str(predecessor_session_id or "").strip()
         if normalized_predecessor:
             lines.append(f"上一轮已收口的 session: `{normalized_predecessor}`。")
+    lines.extend(compact_research_governance_header_lines(spec, continuous_mode=True))
     lines.extend(
         [
             "",
-            *prompt_block_lines("planning_scene_intro"),
-            (
-                "这是新的 Codex session。请直接接住上一轮留下的 history、handoff、proposal 和关键结果，刷新当前最优 proposal，并说明为什么这样选。"
-                if successor_bootstrap
-                else "没有人工干预时，你需要把上一阶段留下的证据、history、handoff 与必要文献放在一起比较，再主动形成当前最优 proposal，并说明为什么这样选。"
-            ),
             (
                 f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
                 if normalized_trigger_signal
-                else "当前要把精力放在刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+                else "当前要把精力放在复审继承边界、刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
             ),
-            "planning 完成标准不是写完一份空文档，而是形成一份可执行、可审计、可分发的 proposal。",
         ]
     )
     lines.extend(runtime_canonical_head_prompt_lines(spec))
@@ -9605,32 +8753,20 @@ def build_continuous_planning_prompt(
     if next_action_lines:
         lines.append("")
         lines.extend(next_action_lines)
+    lines.extend(["", *prompt_block_lines("proposal_writing_requirements")])
     lines.extend(
         [
             "",
-            "本轮决策顺序：",
-            "1. 先把上一阶段留下的结果、失败边界、未解问题和必须继承的文件整理成当前 planning 的输入；如果主线真的进入新的方法方向，就补读最关键的旧文献与近年的代表性新工作。",
-            "2. 写或刷新当前 proposal：明确 benchmark/数据集、比较对象、核心假设、实验设计、实现要点、验证指标、停止条件和风险边界。",
-            "3. 如果还缺本地 CPU 审计、脚本或配置落盘、smoke 前置或首个实验包，就在当前对话里补齐，不要把这些准备动作外包成新的阶段。",
-            (
-                f"4. planning 不要用 `TASKBOARD_SIGNAL=none` 停住；当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL={EXECUTION_READY_SIGNAL}`。如果你已经在这一轮里提交了 live task 并开始等待回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`。"
-                if successor_bootstrap
-                else f"4. 当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL={EXECUTION_READY_SIGNAL}`，把链路推进到 execution。"
-            ),
-            "",
             "taskboard 使用说明：",
             "- planning 不要停在“材料差一点”。当前上下文里还能补齐的审计、配置和 smoke 前置，就直接补齐。",
+            f"- 当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL={EXECUTION_READY_SIGNAL}`。",
+            f"- 如果你已经在这一轮里提交了 live task 并开始等待回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`。",
         ]
     )
     submit_line = submit_binding_instruction_line(spec)
     if submit_line:
         lines.append(f"- {submit_line}")
-    lines.extend(
-        [
-            "",
-            *taskboard_footer_contract_lines(),
-        ]
-    )
+    lines.extend(["", *taskboard_footer_contract_lines()])
     return join_prompt_lines(lines)
 
 
@@ -9646,10 +8782,6 @@ def build_successor_bootstrap_prompt(
         successor_bootstrap=True,
         predecessor_session_id=predecessor_session_id,
     )
-
-
-def build_materials_ready_for_proposal_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
-    return build_continuous_planning_prompt(spec, trigger_signal=trigger_signal or EXECUTION_READY_SIGNAL)
 
 
 def build_continuous_research_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
@@ -9673,18 +8805,16 @@ def build_continuous_research_prompt(spec: dict[str, Any], *, trigger_signal: st
 
 def build_continuous_transition_prompt(spec: dict[str, Any], *, trigger_signal: str = "") -> str:
     normalized_trigger_signal = canonicalize_taskboard_signal(str(trigger_signal or "").strip())
-    lines = compact_research_governance_header_lines(spec, continuous_mode=True)
+    lines = [*prompt_block_lines("closeout_scene_intro")]
+    lines.extend(compact_research_governance_header_lines(spec, continuous_mode=True))
     lines.extend(
         [
             "",
-            *prompt_block_lines("closeout_scene_intro"),
-            "没有人工干预时，你要把这一阶段加工成下一轮最稳妥的起点，并说明为什么现在应该收口，而不是继续扩展当前 proposal。",
             (
                 f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
                 if normalized_trigger_signal
                 else "当前 proposal 已进入收口阶段。"
             ),
-            "请不要把 closeout 当成偷懒出口；只有在 execution 中已经写明“为什么继续下去没有信息收益”后，closeout 才成立。",
         ]
     )
     lines.extend(runtime_canonical_head_prompt_lines(spec))
@@ -9692,22 +8822,15 @@ def build_continuous_transition_prompt(spec: dict[str, Any], *, trigger_signal: 
     if next_action_lines:
         lines.append("")
         lines.extend(next_action_lines)
+    lines.extend(["", *prompt_block_lines("history_writeback_requirements")])
+    lines.extend(["", *prompt_block_lines("handoff_writing_requirements")])
     lines.extend(
         [
             "",
-            "本轮决策顺序：",
-            "1. 对当前 proposal 做全量数据统计、结果处理、内容总结，并且说人话：写清具体做了什么、得到了什么结果、这些 benchmark 数字在科学意义上说明了什么、对总体主线有什么影响。",
-            "2. 把当前 proposal 的关键结论、失败边界、时间戳和查询路径写入 project history，附上 proposal、report、日志、结果文件、handoff 等文件地址。",
-            "3. 写一份说人话的 handoff 文档：说明项目背景和现状、当前主线、待解决问题、必须阅读的文件，以及建议后续查阅哪些顶刊顶会方向；文献只能借鉴灵感，创新点必须从我们自己的结果里生长出来。",
-            "4. 做一次 handoff 确认 / binding 确认：明确上一轮 proposal、当前 closeout 文档、history 路径，以及下一阶段 planning 应继承的 proposal/handoff 入口，避免错绑。",
-            "5. 完成 closeout 后，本轮 `TASKBOARD_SIGNAL` 默认写 `none`；taskboard 会冻结当前 session，并基于 handoff 强制开启新的 Codex session 进入下一轮 planning。",
+            "closeout 完成后，本轮 `TASKBOARD_SIGNAL` 默认写 `none`；taskboard 会冻结当前 session，并基于 handoff 强制开启新的 Codex session 进入下一轮 planning。",
+            "请在收口结尾明确确认：当前 proposal、history、handoff 三个入口分别是哪一份文件，以及下一轮 planning 应继承哪一个入口。",
         ]
     )
-    lines.extend(["", "taskboard 使用说明："])
-    submit_line = submit_binding_instruction_line(spec)
-    if submit_line:
-        lines.append(f"- {submit_line}")
-    lines.append("- 只有当你发现某个当前上下文里就能完成的动作会直接改变结论、显著降低关键不确定性，或者把实验包从不可提交变为可提交时，才允许退出 closeout 回到 execution。")
     lines.extend(["", *taskboard_footer_contract_lines()])
     return join_prompt_lines(lines)
 
@@ -9825,7 +8948,7 @@ def truncate_prompt_preserving_tail(head: str, tail: str, max_chars: int) -> str
     if len(trimmed_tail) >= normalized_max_chars:
         priority_markers = [
             "安全说明：",
-            "后续动作指令：",
+            "taskboard 使用说明：",
             "TASKBOARD_SIGNAL=",
         ]
         for marker in priority_markers:
@@ -9908,9 +9031,9 @@ def build_queued_feedback_batch_prompt(
     entry_count = len(queued_notifications)
     context_spec = resume_prompt_context_spec(spec, queued_notifications)
     header_lines = [
-        *compact_runtime_resume_header_lines(context_spec),
-        "",
         *prompt_block_lines("reflow_intro"),
+        "",
+        *compact_runtime_resume_header_lines(context_spec),
     ]
     if continuous_research_enabled:
         header_lines.append(
@@ -9921,7 +9044,7 @@ def build_queued_feedback_batch_prompt(
         f"这次共有 {entry_count} 条更新来自同一会话，请合并判断它们的共同影响，不要把它们拆成新的独立对话。",
         f"合并更新数量: {entry_count}",
         "",
-        *compact_context_sections(context_spec, include_canonical_head=True, include_evidence_first=True),
+        *compact_context_sections(context_spec, include_canonical_head=True),
         ]
     )
     blocks = [
@@ -9929,19 +9052,12 @@ def build_queued_feedback_batch_prompt(
         for index, item in enumerate(queued_notifications, start=1)
     ]
     tail_sections = [
-        "\n".join(
-            execution_followthrough_instruction_lines(
-                context_spec,
-                allow_no_further_tasks=not continuous_research_enabled,
-                profile=PROMPT_PROFILE_RESUME_COMPACT,
-            )
-        ).strip(),
+        "\n".join(execution_runtime_guidance_lines(context_spec, continuous_research_enabled=continuous_research_enabled)).strip(),
         "\n".join(build_resume_safety_lines()).strip(),
         "\n".join(
             [
-                "后续动作指令：",
-                "请先把上面的全部更新并回当前 proposal/history，再综合判断当前唯一最高优先级动作。",
-                "如果顺手还能完成便宜的审计、修复、数据处理或实验准备，也尽量在这一轮一起做掉。",
+                "请先把上面的全部更新并回当前 proposal，再综合判断当前唯一最高优先级动作。",
+                "如果顺手还能完成便宜但关键的审计、修复、数据处理、smoke 或实验准备，也尽量在这一轮一起做掉。",
                 "请留在当前对话中继续推进，不要重置用户当前上下文。",
             ]
         ).strip(),
@@ -10006,29 +9122,24 @@ def build_resume_prompt(
         custom_instruction,
     )
     governance_head_lines: list[str] = [
-        *compact_runtime_resume_header_lines(spec),
-        "",
         *build_resume_intro(str(spec.get("execution_mode", "")), spec),
+        "",
+        *compact_runtime_resume_header_lines(spec),
     ]
     if continuous_research_enabled:
         governance_head_lines.append("这是 continuous 主线上的一次结果回流。没有人工干预时，请先比较几条可选路径，再主动执行当前最有信息增益的一步，并说明理由。")
     context_lines: list[str] = [
-        *compact_context_sections(spec, include_canonical_head=True, include_evidence_first=True),
+        *compact_context_sections(spec, include_canonical_head=True),
         "",
         *build_resume_event_detail_lines(spec, event),
     ]
     artifact_lines = build_resume_artifact_lines(event)
     governance_tail_lines: list[str] = [
-        *execution_followthrough_instruction_lines(
-            spec,
-            allow_no_further_tasks=not continuous_research_enabled,
-            profile=PROMPT_PROFILE_RESUME_COMPACT,
-        ),
+        *execution_runtime_guidance_lines(spec, continuous_research_enabled=continuous_research_enabled),
         *build_resume_safety_lines(),
         "",
-        "后续动作指令：",
-        "先把这次新增结果并回当前 proposal/history，再判断当前最值得做的一步。",
-        "如果顺手还能完成便宜的审计、修复、数据处理或实验准备，也尽量在这一轮一起做掉。",
+        "先把这次新增结果并回当前 proposal，再判断当前最值得做的一步。",
+        "如果顺手还能完成便宜但关键的审计、修复、数据处理、smoke 或实验准备，也尽量在这一轮一起做掉。",
         instruction,
         "请留在当前对话中继续推进，不要重置用户当前上下文。",
         "",
@@ -11530,7 +10641,6 @@ def automation_recommendation_for_session(
     *,
     human_guidance_active: bool,
     effective_wait_state: str = "",
-    parked_watchdog_due: bool = False,
     next_action_hint: dict[str, Any] | None = None,
     session_state: dict[str, Any] | None = None,
 ) -> str:
@@ -11559,10 +10669,6 @@ def automation_recommendation_for_session(
         return "collect_local_evidence"
     if bool((next_action_hint or {}).get("controller_inherit_local", False)):
         return "continue_local_microstep"
-    if parked_watchdog_due and normalized_wait_state in PARKED_IDLE_SIGNALS:
-        return "dispatch_parked_watchdog"
-    if normalized_wait_state in PARKED_IDLE_SIGNALS:
-        return "wait_for_external_evidence"
     return "safe_to_dispatch"
 
 
@@ -11609,22 +10715,6 @@ def build_continuous_mode_status_payload(
     automation_mode_name = automation_mode_label(config, codex_session_id=resolved_session_id) if resolved_session_id else "managed"
     managed_mode_active = automation_mode_is_managed(config, codex_session_id=resolved_session_id) if resolved_session_id else False
     backlog = reflow_backlog_summary(config, codex_session_id=resolved_session_id, followups=followups)
-    parked_wait_age_seconds = (
-        continuous_session_parked_wait_age_seconds(target_state)
-        if effective_wait_state in PARKED_IDLE_SIGNALS
-        else 0
-    )
-    parked_watchdog_due = (
-        continuous_session_parked_watchdog_due(target_state)
-        if effective_wait_state in PARKED_IDLE_SIGNALS
-        else False
-    )
-    parked_watchdog_interval_seconds = continuous_session_parked_watchdog_interval_seconds(target_state)
-    parked_watchdog_due_ts = (
-        continuous_session_parked_watchdog_due_ts(target_state)
-        if effective_wait_state in PARKED_IDLE_SIGNALS
-        else 0.0
-    )
     active_followup = active_session_followup(followups, resolved_session_id)
     next_actual_resume_ts = 0.0
     try:
@@ -11633,12 +10723,10 @@ def build_continuous_mode_status_payload(
         next_actual_resume_ts = 0.0
     next_actual_resume_at = format_unix_timestamp(next_actual_resume_ts) if next_actual_resume_ts > 0 else ""
     next_actual_resume_in_seconds = max(0, retry_after_seconds_from_target(next_actual_resume_ts)) if next_actual_resume_ts > 0 else 0
-    parked_watchdog_due_at = format_unix_timestamp(parked_watchdog_due_ts) if parked_watchdog_due_ts > 0 else ""
     automation_recommendation = automation_recommendation_for_session(
         live_snapshot,
         human_guidance_active=managed_mode_active,
         effective_wait_state=effective_wait_state,
-        parked_watchdog_due=parked_watchdog_due,
         next_action_hint=next_action_hint,
         session_state=target_state,
     )
@@ -11683,11 +10771,6 @@ def build_continuous_mode_status_payload(
         "awaiting_feedback_task_ids": list(
             live_snapshot.get("awaiting_feedback_task_ids", live_snapshot.get("pending_feedback_live_task_ids", []))
         ),
-        "parked_wait_age_seconds": parked_wait_age_seconds,
-        "parked_watchdog_due": parked_watchdog_due,
-        "parked_watchdog_interval_seconds": parked_watchdog_interval_seconds,
-        "parked_watchdog_due_ts": parked_watchdog_due_ts,
-        "parked_watchdog_due_at": parked_watchdog_due_at,
         "active_followup_key": str(active_followup.get("followup_key", "")).strip(),
         "active_followup_reason": str(active_followup.get("reason", "")).strip(),
         "active_followup_type": str(active_followup.get("followup_type", "")).strip(),
@@ -11743,11 +10826,6 @@ def build_continuous_mode_status_payload(
         "platform_attention_task_ids": list(live_snapshot.get("platform_attention_task_ids", [])),
         "automation_mode": automation_mode_name,
         "managed_mode_active": managed_mode_active,
-        "parked_wait_age_seconds": parked_wait_age_seconds,
-        "parked_watchdog_due": parked_watchdog_due,
-        "parked_watchdog_interval_seconds": parked_watchdog_interval_seconds,
-        "parked_watchdog_due_ts": parked_watchdog_due_ts,
-        "parked_watchdog_due_at": parked_watchdog_due_at,
         "active_followup_key": str(active_followup.get("followup_key", "")).strip(),
         "active_followup_reason": str(active_followup.get("reason", "")).strip(),
         "active_followup_type": str(active_followup.get("followup_type", "")).strip(),
@@ -11808,86 +10886,6 @@ def continuous_session_reminder_delay_seconds(config: AppConfig, session_id: str
     return max(DEFAULT_CONTINUOUS_RESEARCH_DELAY_SECONDS, retry_after_seconds_from_target(target_ts))
 
 
-def continuous_session_parked_wait_age_seconds(
-    session_state: dict[str, Any],
-    *,
-    now_ts: float | None = None,
-) -> int:
-    waiting_since_ts = (
-        parse_timestamp_to_unix(session_state.get("waiting_since"))
-        or parse_timestamp_to_unix(session_state.get("updated_at"))
-        or 0.0
-    )
-    if waiting_since_ts <= 0:
-        return 0
-    current_ts = float(now_ts if now_ts is not None else time.time())
-    return max(0, int(current_ts - waiting_since_ts))
-
-
-def continuous_session_parked_watchdog_interval_seconds(session_state: dict[str, Any]) -> int:
-    repeat_count = max(
-        CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD,
-        int(session_state.get("stable_idle_repeat_count", 0) or 0),
-    )
-    if repeat_count <= CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD:
-        return DEFAULT_CONTINUOUS_RESEARCH_INITIAL_PARKED_RECHECK_SECONDS
-    exponent = max(0, repeat_count - CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD - 1)
-    interval = DEFAULT_CONTINUOUS_RESEARCH_PARKED_REMINDER_SECONDS * (2 ** exponent)
-    return min(MAX_CONTINUOUS_RESEARCH_PARKED_REMINDER_SECONDS, interval)
-
-
-def continuous_session_parked_watchdog_due_ts(session_state: dict[str, Any]) -> float:
-    waiting_state = str(session_state.get("waiting_state", "")).strip()
-    if waiting_state not in PARKED_IDLE_SIGNALS:
-        return 0.0
-    waiting_since_ts = (
-        parse_timestamp_to_unix(session_state.get("waiting_since"))
-        or parse_timestamp_to_unix(session_state.get("updated_at"))
-        or 0.0
-    )
-    if waiting_since_ts <= 0:
-        return 0.0
-    interval_seconds = max(
-        DEFAULT_CONTINUOUS_RESEARCH_DELAY_SECONDS,
-        continuous_session_parked_watchdog_interval_seconds(session_state),
-    )
-    return waiting_since_ts + float(interval_seconds)
-
-
-def continuous_session_parked_watchdog_due(
-    session_state: dict[str, Any],
-    *,
-    now_ts: float | None = None,
-    reminder_seconds: int | None = None,
-) -> bool:
-    waiting_state = str(session_state.get("waiting_state", "")).strip()
-    if waiting_state not in PARKED_IDLE_SIGNALS:
-        return False
-    threshold_seconds = max(
-        DEFAULT_CONTINUOUS_RESEARCH_DELAY_SECONDS,
-        int(
-            reminder_seconds
-            if reminder_seconds is not None
-            else continuous_session_parked_watchdog_interval_seconds(session_state)
-        ),
-    )
-    if threshold_seconds <= 0:
-        return True
-    return continuous_session_parked_wait_age_seconds(session_state, now_ts=now_ts) >= threshold_seconds
-
-
-def continuous_session_parked_watchdog_pending_delay_seconds(
-    session_state: dict[str, Any],
-    *,
-    now_ts: float | None = None,
-) -> int:
-    due_ts = continuous_session_parked_watchdog_due_ts(session_state)
-    current_ts = float(now_ts if now_ts is not None else time.time())
-    if due_ts <= 0:
-        return DEFAULT_CONTINUOUS_RESEARCH_INITIAL_PARKED_RECHECK_SECONDS
-    return max(0, int(math.ceil(due_ts - current_ts)))
-
-
 def continuous_session_reminder_schedule_params(
     config: AppConfig,
     session_id: str,
@@ -11895,14 +10893,13 @@ def continuous_session_reminder_schedule_params(
     *,
     session_state: dict[str, Any] | None = None,
     waiting_state: str = "",
-    parked_watchdog_due: bool = False,
     next_action_hint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_state = session_state if isinstance(session_state, dict) else {}
     normalized_waiting_state = str(waiting_state or current_state.get("waiting_state", "")).strip()
     if bool((next_action_hint or {}).get("dispatch_ready", False)):
         return {
-            "reason": PROPOSAL_MATERIALIZATION_REASON,
+            "reason": CONTINUOUS_RESEARCH_NEXT_ACTION_REASON,
             "delay_seconds": continuous_session_reminder_delay_seconds(config, session_id, spec),
             "interval_seconds": DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS,
             "min_idle_seconds": DEFAULT_CONTINUOUS_RESEARCH_MIN_IDLE_SECONDS,
@@ -11991,7 +10988,6 @@ def ensure_continuous_research_session_reminders(config: AppConfig) -> list[dict
             **anchor_spec,
             "controller_continuation_hint": dict(next_action_hint),
         } if next_action_hint.get("action_text") else dict(anchor_spec)
-        parked_watchdog_due = False
         live_snapshot = continuous_session_live_task_snapshot(config, session_id, states=states)
         awaiting_feedback = int(live_snapshot.get("awaiting_feedback_task_count", 0) or 0) > 0
         stale_waiting = (
@@ -12032,7 +11028,6 @@ def ensure_continuous_research_session_reminders(config: AppConfig) -> list[dict
             anchor_spec_with_hint,
             session_state=session_state,
             waiting_state=waiting_state,
-            parked_watchdog_due=parked_watchdog_due,
             next_action_hint=next_action_hint,
         )
         schedule_continuous_session_reminder(
@@ -15278,67 +14273,6 @@ def handle_task_feedback(
             )
             notification["resolved_signal_none"] = True
             return notification
-        if notification.get("ok", False) and notification_signal in PARKED_IDLE_SIGNALS:
-            session_id = str(spec.get("codex_session_id", "")).strip()
-            evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec) if session_id else ""
-            repeat_count = CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD
-            immediate_watchdog_scheduled = False
-            if session_id:
-                previous_state = continuous_research_session_state(config, session_id)
-                repeat_count = next_parked_idle_repeat_count(previous_state, evidence_token=evidence_token)
-                park_continuous_research_session(
-                    config,
-                    codex_session_id=session_id,
-                    waiting_state=notification_signal,
-                    waiting_reason="agent_requested_parked_idle",
-                    evidence_token=evidence_token,
-                    last_signal=notification_signal,
-                    stable_idle_repeat_count=repeat_count,
-                    updated_by="feedback",
-                    source="handle-task-feedback",
-                )
-                if should_schedule_immediate_parked_watchdog(
-                    config,
-                    session_id=session_id,
-                    spec=spec,
-                    repeat_count=repeat_count,
-                ):
-                    schedule_immediate_parked_watchdog(
-                        config,
-                        session_id=session_id,
-                        spec=spec,
-                        signal_value=notification_signal,
-                    )
-                    immediate_watchdog_scheduled = True
-            merge_task_state(
-                config,
-                task_id,
-                research_phase="execution",
-                session_flow_state="parked_idle",
-                followup_status="scheduled" if immediate_watchdog_scheduled else "resolved",
-                followup_last_signal=notification_signal,
-                followup_last_action=(
-                    f"scheduled:{CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON}"
-                    if immediate_watchdog_scheduled
-                    else "resolved_parked_idle"
-                ),
-                followup_stopped_at="" if immediate_watchdog_scheduled else utc_now(),
-                followup_last_message_path=str(task_last_message_path(config, task_id)),
-                notification_signal=notification_signal,
-                notification_summary={
-                    **(notification.get("notification_summary", {}) if isinstance(notification.get("notification_summary"), dict) else {}),
-                    "research_phase": "execution",
-                    "session_flow_state": "parked_idle",
-                    "taskboard_signal": notification_signal,
-                    "waiting_evidence_token": evidence_token,
-                    "immediate_parked_watchdog_scheduled": immediate_watchdog_scheduled,
-                },
-            )
-            notification["research_phase"] = "execution"
-            notification["session_flow_state"] = "parked_idle"
-            notification["waiting_evidence_token"] = evidence_token
-            notification["immediate_parked_watchdog_scheduled"] = immediate_watchdog_scheduled
-            return notification
         if notification.get("ok", False) and notification_signal in INLINE_CONTINUE_SIGNALS:
             current_state = load_task_state(config, task_id)
             current_summary = current_state.get("notification_summary", {}) if isinstance(current_state.get("notification_summary", {}), dict) else {}
@@ -15375,98 +14309,6 @@ def handle_task_feedback(
             notification["waiting_evidence_token"] = evidence_token
             notification["inline_continue_no_wake"] = True
             return notification
-        if notification.get("ok", False) and notification_signal == MATERIALS_READY_FOR_PROPOSAL_SIGNAL:
-            current_state = load_task_state(config, task_id)
-            current_summary = current_state.get("notification_summary", {}) if isinstance(current_state.get("notification_summary", {}), dict) else {}
-            proposal_materialization_followup_scheduled = False
-            session_id = str(spec.get("codex_session_id", "")).strip()
-            evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec) if session_id else ""
-            if session_id:
-                clear_continuous_research_session_waiting_state(
-                    config,
-                    codex_session_id=session_id,
-                    evidence_token=evidence_token,
-                    last_signal=notification_signal,
-                    updated_by="feedback",
-                    source=PROPOSAL_MATERIALIZATION_REASON,
-                )
-            if should_schedule_followup_for_spec(spec):
-                schedule_continuous_transition_followup(
-                    config,
-                    task_id=task_id,
-                    spec=spec,
-                    trigger_signal=notification_signal,
-                    message_path=str(task_last_message_path(config, task_id)),
-                )
-                proposal_materialization_followup_scheduled = True
-            merge_task_state(
-                config,
-                task_id,
-                research_phase="closeout",
-                session_flow_state="proposal_materialization",
-                followup_status="scheduled" if proposal_materialization_followup_scheduled else str(current_state.get("followup_status", "")),
-                followup_last_signal=notification_signal,
-                followup_last_action=(
-                    f"scheduled:{CONTINUOUS_RESEARCH_TRANSITION_REASON}"
-                    if proposal_materialization_followup_scheduled
-                    else "proposal_materialization_without_followup"
-                ),
-                followup_stopped_at="" if proposal_materialization_followup_scheduled else str(current_state.get("followup_stopped_at", "")),
-                followup_last_message_path=str(task_last_message_path(config, task_id)),
-                notification_signal=notification_signal,
-                notification_summary={
-                    **current_summary,
-                    "research_phase": "closeout",
-                    "session_flow_state": "proposal_materialization",
-                    "taskboard_signal": notification_signal,
-                },
-            )
-            notification["research_phase"] = "closeout"
-            notification["session_flow_state"] = "proposal_materialization"
-            notification["proposal_materialization_followup_scheduled"] = proposal_materialization_followup_scheduled
-            return notification
-        if notification.get("ok", False) and notification_signal in LOCAL_MICROSTEP_BATCH_SIGNALS:
-            current_state = load_task_state(config, task_id)
-            current_summary = current_state.get("notification_summary", {}) if isinstance(current_state.get("notification_summary", {}), dict) else {}
-            local_followup_scheduled = False
-            session_id = str(spec.get("codex_session_id", "")).strip()
-            evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec) if session_id else ""
-            if session_id:
-                clear_continuous_research_session_waiting_state(
-                    config,
-                    codex_session_id=session_id,
-                    evidence_token=evidence_token,
-                    last_signal=notification_signal,
-                    stable_idle_repeat_count=1,
-                    updated_by="feedback",
-                    source="handle-task-feedback-local-microstep",
-                )
-            if should_schedule_followup_for_spec(spec):
-                local_followup_scheduled = schedule_local_microstep_followup(config, task_id=task_id, spec=spec)
-            merge_task_state(
-                config,
-                task_id,
-                research_phase="execution",
-                session_flow_state="local_active",
-                followup_status="scheduled" if local_followup_scheduled else str(current_state.get("followup_status", "")),
-                followup_last_signal=notification_signal,
-                followup_last_action=(
-                    f"scheduled:{LOCAL_MICROSTEP_BATCH_REASON}" if local_followup_scheduled else "local_microstep_signal_without_followup"
-                ),
-                followup_stopped_at="" if local_followup_scheduled else str(current_state.get("followup_stopped_at", "")),
-                followup_last_message_path=str(task_last_message_path(config, task_id)),
-                notification_signal=notification_signal,
-                notification_summary={
-                    **current_summary,
-                    "research_phase": "execution",
-                    "session_flow_state": "local_active",
-                    "taskboard_signal": notification_signal,
-                },
-            )
-            notification["research_phase"] = "execution"
-            notification["session_flow_state"] = "local_active"
-            notification["local_microstep_followup_scheduled"] = local_followup_scheduled
-            return notification
         if notification.get("ok", False) and notification_signal in WAITING_ON_ASYNC_SIGNALS:
             current_state = load_task_state(config, task_id)
             current_summary = current_state.get("notification_summary", {}) if isinstance(current_state.get("notification_summary", {}), dict) else {}
@@ -15479,50 +14321,6 @@ def handle_task_feedback(
                 source_task_id=task_id,
             )
             evidence_token = continuous_research_session_evidence_token(config, session_id, spec=spec) if session_id else ""
-            guard_enabled, parked_waiting_state, guarded_evidence_token, repeat_count = parked_waiting_signal_guard_details(
-                config,
-                session_id=session_id,
-                spec=spec,
-                followup_last_signal=str(current_state.get("followup_last_signal", "")).strip(),
-                newer_async_task_exists=newer_async_task_exists,
-            )
-            if guard_enabled:
-                guard_parked_waiting_signal_without_live_task(
-                    config,
-                    session_id=session_id,
-                    spec=spec,
-                    parked_waiting_state=parked_waiting_state,
-                    evidence_token=guarded_evidence_token,
-                    repeat_count=repeat_count,
-                    updated_by="feedback",
-                    source="handle-task-feedback-guard-invalid-waiting-signal",
-                )
-                merge_task_state(
-                    config,
-                    task_id,
-                    research_phase="execution",
-                    session_flow_state="parked_idle",
-                    followup_status="resolved",
-                    followup_last_signal=notification_signal,
-                    followup_last_action="guarded_invalid_waiting_signal_to_parked_idle",
-                    followup_last_message_path=str(task_last_message_path(config, task_id)),
-                    notification_signal=notification_signal,
-                    notification_summary={
-                        **current_summary,
-                        "research_phase": "execution",
-                        "session_flow_state": "parked_idle",
-                        "taskboard_signal": notification_signal,
-                        "guarded_invalid_waiting_signal": True,
-                        "guarded_to": parked_waiting_state,
-                        "waiting_evidence_token": guarded_evidence_token,
-                    },
-                )
-                notification["research_phase"] = "execution"
-                notification["session_flow_state"] = "parked_idle"
-                notification["guarded_invalid_waiting_signal"] = True
-                notification["guarded_to"] = parked_waiting_state
-                notification["waiting_evidence_token"] = guarded_evidence_token
-                return notification
             if session_id:
                 clear_continuous_research_session_waiting_state(
                     config,

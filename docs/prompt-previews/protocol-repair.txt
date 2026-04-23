@@ -10,7 +10,7 @@ project_history_file: [/home/Awei/project/docs/HISTORY.md]
 handoff_file: [/home/Awei/project/docs/HANDOFF.md]
 project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
 当前 proposal 以上面的 proposal_file 为准。
-本轮可靠结果、关键诊断结论和下一步明确动作默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。
+当前 history 以上面的 project_history_file 为准。
 请不要重写整段 proposal，也不要重新展开长篇分析。
 只做两件事：
 1. 用 1-2 句人话确认当前唯一最高优先级动作；如果它仍是当前回合内可吸收的本地短步骤，可以直接做完再回复。

@@ -35,7 +35,7 @@ def build_hooks(**overrides: object) -> SessionRuntimeHooks:
         "extract_taskboard_protocol_footer": lambda text: {},
         "list_proc_entries": lambda: [],
         "now_ts": lambda: 100.0,
-        "taskboard_final_signal_values": {"WAITING_ON_ASYNC", "NO_FURTHER_TASKS", "TASK_DONE"},
+        "taskboard_final_signal_values": {"WAITING_ON_ASYNC", "CLOSEOUT_READY", "TASK_DONE"},
         "rate_limit_patterns": ("429 too many requests", "retry limit"),
         "session_busy_patterns": ("session is busy",),
         "platform_error_signatures": (

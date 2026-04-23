@@ -437,7 +437,7 @@ class SessionMigrationTests(unittest.TestCase):
                     track_resume_feedback,
                 )
                 self.assertEqual(mode, "exec")
-                self.assertIn("强制开启的新 planning session", prompt)
+                self.assertIn("强制创建的新 Codex session", prompt)
                 Path(output_last_message_path).parent.mkdir(parents=True, exist_ok=True)
                 Path(output_last_message_path).write_text(
                     "successor planning done\nTASKBOARD_SIGNAL=EXECUTION_READY\nTASKBOARD_SELF_CHECK=pass\nLIVE_TASK_STATUS=none\n",

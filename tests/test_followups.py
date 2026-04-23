@@ -93,8 +93,8 @@ class FollowupTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("你现在处于 planning。", prompt)
-        self.assertIn("planning 完成标准不是写完一份空文档", prompt)
+        self.assertIn("现在处于 planning 阶段", prompt)
+        self.assertIn("先做继承审计，不要急着开新题", prompt)
         self.assertIn("TASKBOARD_SIGNAL=EXECUTION_READY", prompt)
 
     def test_build_continuous_execution_prompt_keeps_unified_context(self) -> None:
@@ -111,9 +111,9 @@ class FollowupTests(unittest.TestCase):
             trigger_signal="EXECUTION_READY",
         )
 
-        self.assertIn("你现在处于 execution。", prompt)
-        self.assertIn("统一 execution 上下文", prompt)
-        self.assertIn("明确出口", prompt)
+        self.assertIn("现在处于 execution 阶段", prompt)
+        self.assertIn("根据 `project_history_file` 和当前 `proposal_file` 的规划推进工作", prompt)
+        self.assertIn("这一轮默认在同一个 execution 上下文里完成", prompt)
         self.assertIn("TASKBOARD_SIGNAL=WAITING_ON_ASYNC", prompt)
 
     def test_build_continuous_execution_prompt_adds_repeat_guard_after_repeated_microsteps(self) -> None:
@@ -174,10 +174,10 @@ class FollowupTests(unittest.TestCase):
             trigger_signal="CLOSEOUT_READY",
         )
 
-        self.assertIn("你现在处于 closeout。", prompt)
-        self.assertIn("handoff 确认", prompt)
+        self.assertIn("现在处于 closeout 阶段", prompt)
+        self.assertIn("closeout 初审", prompt)
         self.assertIn("强制开启新的 Codex session", prompt)
-        self.assertIn("显著降低关键不确定性", prompt)
+        self.assertIn("proposal、history、handoff 三个入口分别是哪一份文件", prompt)
 
     def test_build_successor_bootstrap_prompt_forces_new_session_planning(self) -> None:
         prompt = build_successor_bootstrap_prompt(
@@ -194,9 +194,9 @@ class FollowupTests(unittest.TestCase):
             trigger_signal="none",
         )
 
-        self.assertIn("强制开启的新 planning session", prompt)
+        self.assertIn("强制创建的新 Codex session", prompt)
         self.assertIn("上一轮已收口的 session", prompt)
-        self.assertIn("planning 不要用 `TASKBOARD_SIGNAL=none` 停住", prompt)
+        self.assertIn("必须先复审上一轮 closeout 的可靠性", prompt)
 
     def test_managed_mode_only_becomes_active_after_explicit_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -253,7 +253,7 @@ class FollowupTests(unittest.TestCase):
                     exit_code = command_enter_stage(args)
 
             self.assertEqual(exit_code, 0)
-            self.assertIn("你现在处于 planning。", stdout.getvalue())
+            self.assertIn("现在处于 planning 阶段", stdout.getvalue())
             state = continuous_research_session_state(build_config(app_home), "session-enter-001")
             self.assertEqual(state["proposal_path"], str(proposal_path.resolve()))
             self.assertEqual(state["project_history_file"], str(history_path.resolve()))

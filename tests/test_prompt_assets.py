@@ -17,9 +17,8 @@ class PromptAssetTests(unittest.TestCase):
             prompt_file.write_text(
                 (
                     '[blocks]\n'
-                    'light_research_agreement = """\n'
-                    '轻度科研约定：\n'
-                    '1. 这是测试自定义 prompt 合同。\n'
+                    'managed_followup_intro = """\n'
+                    '这是测试自定义 managed prompt。\n'
                     '"""\n'
                 ),
                 encoding="utf-8",
@@ -35,7 +34,7 @@ class PromptAssetTests(unittest.TestCase):
                 )
                 prompt_source = active_prompt_source()
 
-            self.assertIn("这是测试自定义 prompt 合同", prompt)
+            self.assertIn("这是测试自定义 managed prompt", prompt)
             self.assertEqual(prompt_source, str(prompt_file.resolve()))
 
     def test_resume_prompt_keeps_footer_as_last_block(self) -> None:

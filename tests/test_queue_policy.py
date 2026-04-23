@@ -176,7 +176,7 @@ class QueuePolicyTests(unittest.TestCase):
                 "status": "completed",
                 "failure_kind": "",
                 "ended_at": datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
-                "taskboard_signal": "NO_FURTHER_TASKS",
+                "taskboard_signal": "CLOSEOUT_READY",
             }
             spec = {
                 "task_id": "task-a",

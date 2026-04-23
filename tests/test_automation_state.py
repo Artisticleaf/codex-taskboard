@@ -13,7 +13,6 @@ from codex_taskboard.automation_state import (
     human_guidance_mode_active,
     load_continuous_research_mode,
     load_human_guidance_mode,
-    park_continuous_research_session,
     set_continuous_research_mode,
     set_human_guidance_mode,
 )
@@ -75,9 +74,7 @@ def make_hooks() -> AutomationStateHooks:
         human_guidance_mode_filename="human.json",
         default_human_guidance_lease_seconds=900,
         continuous_research_idle_loop_threshold=3,
-        continuous_research_override_signals={"NO_FURTHER_TASKS", "STOP_AUTOMATION"},
-        parked_idle_signal="PARKED_IDLE",
-        parked_idle_signals={"PARKED_IDLE"},
+        continuous_research_override_signals={"CLOSEOUT_READY", "STOP_AUTOMATION"},
     )
 
 
@@ -96,20 +93,6 @@ def test_continuous_research_state_round_trip(tmp_path: Path) -> None:
     assert payload["enabled"] is True
     assert payload["target_codex_session_id"] == "session-a"
     assert continuous_research_enabled_session_ids(config, hooks=hooks) == ["session-a"]
-
-    parked = park_continuous_research_session(
-        config,
-        hooks=hooks,
-        codex_session_id="session-a",
-        waiting_state="PARKED_IDLE",
-        waiting_reason="no-new-evidence",
-        evidence_token="evidence-1",
-        last_signal="parked_idle",
-        stable_idle_repeat_count=4,
-    )
-    state = parked["target_session_state"]
-    assert state["waiting_state"] == "PARKED_IDLE"
-    assert state["last_signal"] == "parked_idle"
 
     cleared = clear_continuous_research_mode_session(config, hooks=hooks, codex_session_id="session-a")
     assert cleared["sessions"] == {}

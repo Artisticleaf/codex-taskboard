@@ -23,8 +23,6 @@ class AutomationStateHooks:
     default_human_guidance_lease_seconds: int
     continuous_research_idle_loop_threshold: int
     continuous_research_override_signals: set[str]
-    parked_idle_signal: str
-    parked_idle_signals: set[str]
 
 
 def continuous_research_mode_path(config: Any, *, hooks: AutomationStateHooks) -> Path:
@@ -296,49 +294,6 @@ def clear_continuous_research_session_waiting_state(
         last_signal=normalized_last_signal,
         **updates,
     )
-
-
-def park_continuous_research_session(
-    config: Any,
-    *,
-    hooks: AutomationStateHooks,
-    codex_session_id: str,
-    waiting_state: str,
-    waiting_reason: str,
-    evidence_token: str,
-    last_signal: str,
-    stable_idle_repeat_count: int,
-    updated_by: str = "followup",
-    source: str = "",
-    **updates: Any,
-) -> dict[str, Any]:
-    normalized_waiting_state = str(waiting_state or "").strip() or hooks.parked_idle_signal
-    return update_continuous_research_session_state(
-        config,
-        hooks=hooks,
-        codex_session_id=codex_session_id,
-        updated_by=updated_by,
-        source=source or "continuous-session-parked",
-        waiting_state=normalized_waiting_state,
-        waiting_reason=str(waiting_reason or normalized_waiting_state).strip(),
-        waiting_since=hooks.utc_now(),
-        waiting_evidence_token=str(evidence_token or ""),
-        last_evidence_token=str(evidence_token or ""),
-        stable_idle_repeat_count=max(hooks.continuous_research_idle_loop_threshold, int(stable_idle_repeat_count or 0)),
-        last_signal=str(last_signal or normalized_waiting_state).strip(),
-        **updates,
-    )
-
-
-def next_parked_idle_repeat_count(session_state: dict[str, Any], *, hooks: AutomationStateHooks, evidence_token: str) -> int:
-    previous_count = max(0, int(session_state.get("stable_idle_repeat_count", 0) or 0))
-    previous_waiting_state = str(session_state.get("waiting_state", "")).strip()
-    previous_token = str(
-        session_state.get("waiting_evidence_token", "") or session_state.get("last_evidence_token", "")
-    ).strip()
-    if evidence_token and previous_token == evidence_token and previous_waiting_state in hooks.parked_idle_signals:
-        return max(previous_count + 1, hooks.continuous_research_idle_loop_threshold)
-    return hooks.continuous_research_idle_loop_threshold
 
 
 def continuous_research_mode_enabled(config: Any, *, hooks: AutomationStateHooks, codex_session_id: str = "") -> bool:

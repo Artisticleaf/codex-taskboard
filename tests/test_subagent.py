@@ -287,7 +287,7 @@ class SubagentTests(unittest.TestCase):
                                 "content": [
                                     {
                                         "type": "output_text",
-                                        "text": "done\nTASKBOARD_SIGNAL=NO_FURTHER_TASKS\n",
+                                        "text": "done\nTASKBOARD_SIGNAL=CLOSEOUT_READY\n",
                                     }
                                 ],
                             },
@@ -320,7 +320,7 @@ class SubagentTests(unittest.TestCase):
                 )
 
             self.assertTrue(result["message_written"])
-            self.assertIn("NO_FURTHER_TASKS", result["last_message_text"])
+            self.assertIn("CLOSEOUT_READY", result["last_message_text"])
             self.assertTrue(output_path.exists())
 
     def test_run_codex_prompt_rollout_fallback_ignores_invalid_json_noise(self) -> None:
@@ -418,7 +418,7 @@ class SubagentTests(unittest.TestCase):
                                         "content": [
                                             {
                                                 "type": "output_text",
-                                                "text": "stale\nTASKBOARD_SIGNAL=NO_FURTHER_TASKS\n",
+                                                "text": "stale\nTASKBOARD_SIGNAL=CLOSEOUT_READY\n",
                                             }
                                         ],
                                     },
@@ -492,7 +492,7 @@ class SubagentTests(unittest.TestCase):
                                 "content": [
                                     {
                                         "type": "output_text",
-                                        "text": "stale live vscode message\nTASKBOARD_SIGNAL=NO_FURTHER_TASKS\n",
+                                        "text": "stale live vscode message\nTASKBOARD_SIGNAL=CLOSEOUT_READY\n",
                                     }
                                 ],
                             },
