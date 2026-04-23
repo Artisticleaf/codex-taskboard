@@ -39,11 +39,12 @@
 例如：
 
 ```bash
-export CODEX_TASKBOARD_API_URL=http://host.docker.internal:8765
+export CODEX_TASKBOARD_API_URL="$(.venv/bin/codex-taskboard api-url --host host.docker.internal)"
 export CODEX_TASKBOARD_API_TOKEN=your-secret-token
 ```
 
-如果容器环境没有 `host.docker.internal`，请替换成宿主机可达 IP。
+这样可以使用 taskboard 为当前实例自动解析并持久化的 API 端口，避免和别的本地服务撞端口。
+如果容器环境没有 `host.docker.internal`，请替换成宿主机可达 IP，或者改用 `codex-taskboard api-url --host <宿主机IP>`。
 
 ## 5. 查看队列
 

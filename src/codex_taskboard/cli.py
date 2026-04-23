@@ -284,6 +284,7 @@ from codex_taskboard.service_manager import (
     ServiceManagerHooks,
     TaskboardServiceSpec,
     build_service_doctor_payload,
+    can_bind_tcp_port,
     default_entrypoint_path,
     render_systemd_unit,
     repo_root,
@@ -345,7 +346,13 @@ CONTINUOUS_RESEARCH_IDLE_LOOP_THRESHOLD = 3
 CONTINUOUS_RESEARCH_LOCAL_FASTPATH_REPEAT_THRESHOLD = 4
 DEFAULT_API_BIND = "127.0.0.1"
 DEFAULT_SERVICE_API_BIND = "0.0.0.0"
+API_PORT_ENV_KEY = "CODEX_TASKBOARD_API_PORT"
+API_PORT_STATE_FILE_NAME = "api-port.json"
+AUTO_API_PORT_SENTINEL = 0
 DEFAULT_API_PORT = 8765
+DEFAULT_API_PORT_BASE = 38000
+DEFAULT_API_PORT_SPAN = 2048
+DEFAULT_API_PORT_SCAN_LIMIT = 256
 DEFAULT_API_POLL_SECONDS = 2.0
 DEFAULT_SERVICE_DISPATCHER_MODE = "gpu-fill"
 DEFAULT_SERVICE_GPU_COUNT = 4
@@ -1297,6 +1304,17 @@ def normalize_project_history_file(raw_value: Any, *, workdir: str = "") -> str:
     return str(path.resolve(strict=False))
 
 
+def normalize_handoff_file(raw_value: Any, *, workdir: str = "") -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        base = Path(workdir).expanduser() if str(workdir or "").strip() else Path.cwd()
+        path = base / path
+    return str(path.resolve(strict=False))
+
+
 def suggested_project_history_log_dir(project_history_file: str) -> str:
     text = str(project_history_file or "").strip()
     if not text:
@@ -2216,6 +2234,60 @@ def proposal_scope_key(*, workdir: str = "", remote_workdir: str = "") -> str:
     return ""
 
 
+def session_bound_context(
+    config: AppConfig,
+    *,
+    codex_session_id: str,
+    workdir: str,
+    remote_workdir: str = "",
+) -> dict[str, Any]:
+    normalized_session_id = str(codex_session_id or "").strip()
+    scope = proposal_scope_key(workdir=workdir, remote_workdir=remote_workdir)
+    if not normalized_session_id or not scope:
+        return {}
+    session_state = continuous_research_session_state(config, normalized_session_id)
+    if not session_state:
+        return {}
+    state_scope = str(session_state.get("binding_scope", "")).strip()
+    if state_scope and state_scope != scope:
+        return {}
+    if not state_scope:
+        bound_remote = normalize_posix_workdir(str(session_state.get("bound_remote_workdir", "")).strip())
+        bound_workdir = normalize_session_guard_workdir(str(session_state.get("bound_workdir", "")).strip())
+        if bound_remote:
+            if scope != f"remote:{bound_remote}":
+                return {}
+        elif bound_workdir:
+            if scope != f"local:{bound_workdir}":
+                return {}
+        else:
+            return {}
+    return {
+        "binding_scope": scope,
+        "bound_workdir": normalize_session_guard_workdir(str(session_state.get("bound_workdir", "")).strip()),
+        "bound_remote_workdir": normalize_posix_workdir(str(session_state.get("bound_remote_workdir", "")).strip()),
+        "proposal_path": normalize_proposal_path(session_state.get("proposal_path", ""), workdir=workdir),
+        "proposal_source": str(session_state.get("proposal_source", "")).strip(),
+        "proposal_owner": bool(session_state.get("proposal_owner", False)),
+        "closeout_proposal_dir": normalize_closeout_proposal_dir(
+            session_state.get("closeout_proposal_dir", ""),
+            workdir=workdir,
+        ),
+        "closeout_proposal_dir_source": str(session_state.get("closeout_proposal_dir_source", "")).strip(),
+        "project_history_file": normalize_project_history_file(
+            session_state.get("project_history_file", ""),
+            workdir=workdir,
+        ),
+        "project_history_file_source": str(session_state.get("project_history_file_source", "")).strip(),
+        "handoff_file": normalize_handoff_file(session_state.get("handoff_file", ""), workdir=workdir),
+        "handoff_source": str(session_state.get("handoff_source", "")).strip(),
+        "research_phase": str(session_state.get("research_phase", "")).strip(),
+        "last_signal": canonicalize_taskboard_signal(str(session_state.get("last_signal", "")).strip()),
+        "next_action_repeat_count": max(0, int(session_state.get("next_action_repeat_count", 0) or 0)),
+        "current_session_state": dict(session_state),
+    }
+
+
 def infer_proposal_owner(spec: dict[str, Any]) -> bool:
     text = " ".join(
         [
@@ -2252,6 +2324,14 @@ def latest_inherited_proposal_path(
     scope = proposal_scope_key(workdir=workdir, remote_workdir=remote_workdir)
     if not normalized_session_id or not scope:
         return "", ""
+    bound_context = session_bound_context(
+        config,
+        codex_session_id=normalized_session_id,
+        workdir=workdir,
+        remote_workdir=remote_workdir,
+    )
+    if str(bound_context.get("proposal_path", "")).strip():
+        return str(bound_context.get("proposal_path", "")).strip(), "session_binding"
     candidates = sorted(iter_all_task_states(config), key=task_state_recency_key, reverse=True)
     fallback: tuple[str, str] = ("", "")
     normalized_agent_name = str(agent_name or "").strip()
@@ -2286,6 +2366,14 @@ def latest_inherited_closeout_proposal_dir(
     scope = proposal_scope_key(workdir=workdir, remote_workdir=remote_workdir)
     if not normalized_session_id or not scope:
         return "", ""
+    bound_context = session_bound_context(
+        config,
+        codex_session_id=normalized_session_id,
+        workdir=workdir,
+        remote_workdir=remote_workdir,
+    )
+    if str(bound_context.get("closeout_proposal_dir", "")).strip():
+        return str(bound_context.get("closeout_proposal_dir", "")).strip(), "session_binding"
     candidates = sorted(iter_all_task_states(config), key=task_state_recency_key, reverse=True)
     fallback: tuple[str, str] = ("", "")
     normalized_agent_name = str(agent_name or "").strip()
@@ -2323,6 +2411,14 @@ def latest_inherited_project_history_file(
     scope = proposal_scope_key(workdir=workdir, remote_workdir=remote_workdir)
     if not normalized_session_id or not scope:
         return "", ""
+    bound_context = session_bound_context(
+        config,
+        codex_session_id=normalized_session_id,
+        workdir=workdir,
+        remote_workdir=remote_workdir,
+    )
+    if str(bound_context.get("project_history_file", "")).strip():
+        return str(bound_context.get("project_history_file", "")).strip(), "session_binding"
     candidates = sorted(iter_all_task_states(config), key=task_state_recency_key, reverse=True)
     fallback: tuple[str, str] = ("", "")
     normalized_agent_name = str(agent_name or "").strip()
@@ -2671,7 +2767,8 @@ def compact_proposal_feedback_instruction_lines(spec: dict[str, Any]) -> list[st
     proposal_path = str(spec.get("proposal_path", "")).strip()
     closeout_proposal_dir = str(spec.get("closeout_proposal_dir", "")).strip()
     project_history_file = str(spec.get("project_history_file", "")).strip()
-    if not proposal_path and not closeout_proposal_dir and not project_history_file:
+    handoff_file = str(spec.get("handoff_file", "")).strip()
+    if not proposal_path and not closeout_proposal_dir and not project_history_file and not handoff_file:
         return []
     lines = [""]
     lines.append("当前绑定：")
@@ -2681,6 +2778,8 @@ def compact_proposal_feedback_instruction_lines(spec: dict[str, Any]) -> list[st
         lines.append(f"closeout_proposal_dir: {prompt_path_marker(closeout_proposal_dir)}")
     if project_history_file:
         lines.append(f"project_history_file: {prompt_path_marker(project_history_file)}")
+    if handoff_file:
+        lines.append(f"handoff_file: {prompt_path_marker(handoff_file)}")
     project_history_log_dir = suggested_project_history_log_dir(project_history_file) if project_history_file else ""
     if project_history_log_dir:
         lines.append(f"project_history_log_dir: {prompt_path_marker(project_history_log_dir)}")
@@ -2728,6 +2827,25 @@ def evidence_first_loop_lines(*, compact: bool = True) -> list[str]:
     return prompt_block_lines("evidence_first")
 
 
+def execution_repeat_guard_lines(spec: dict[str, Any], next_action_hint: dict[str, Any]) -> list[str]:
+    session_state = spec.get("current_session_state", {})
+    if not isinstance(session_state, dict):
+        session_state = {}
+    repeat_count = max(
+        0,
+        int(
+            session_state.get(
+                "next_action_repeat_count",
+                spec.get("next_action_repeat_count", 0),
+            )
+            or 0
+        ),
+    )
+    if repeat_count < CONTINUOUS_RESEARCH_LOCAL_FASTPATH_REPEAT_THRESHOLD:
+        return []
+    return ["", *prompt_block_lines("execution_repeat_guard", repeat_count=repeat_count)]
+
+
 def execution_followthrough_instruction_lines(
     spec: dict[str, Any],
     *,
@@ -2754,7 +2872,7 @@ def execution_followthrough_instruction_lines(
             f"- 如果本轮只剩等待受托管实验回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`；taskboard 会按 1 小时节奏提醒你回来确认实验仍在产出。"
         )
         lines.append(
-            f"- 只有在你已经重读 proposal/history 与本轮证据，并且明确写出“继续当前 proposal 已无新的信息收益”的分析后，才允许输出 `TASKBOARD_SIGNAL={CLOSEOUT_READY_SIGNAL}`。"
+            f"- 只有在你已经重读 proposal/history 与本轮证据，并且明确写出“剩余本地动作已不足以改变结论边界、关键风险判断或实验就绪度，因此继续当前 proposal 已无足够信息增益”的分析后，才允许输出 `TASKBOARD_SIGNAL={CLOSEOUT_READY_SIGNAL}`。"
         )
     return lines
 
@@ -4215,6 +4333,39 @@ def merge_continuous_research_session_state(left: dict[str, Any], right: dict[st
             int(right_state.get("stable_idle_repeat_count", 0) or 0),
         ),
         "last_signal": str(right_state.get("last_signal", "")).strip() or str(left_state.get("last_signal", "")).strip(),
+        "research_phase": str(right_state.get("research_phase", "")).strip() or str(left_state.get("research_phase", "")).strip(),
+        "next_action_hash": str(right_state.get("next_action_hash", "")).strip()
+        or str(left_state.get("next_action_hash", "")).strip(),
+        "next_action_text": str(right_state.get("next_action_text", "")).strip()
+        or str(left_state.get("next_action_text", "")).strip(),
+        "next_action_state": str(right_state.get("next_action_state", "")).strip()
+        or str(left_state.get("next_action_state", "")).strip(),
+        "next_action_source_path": str(right_state.get("next_action_source_path", "")).strip()
+        or str(left_state.get("next_action_source_path", "")).strip(),
+        "next_action_source_updated_at": str(right_state.get("next_action_source_updated_at", "")).strip()
+        or str(left_state.get("next_action_source_updated_at", "")).strip(),
+        "next_action_repeat_count": max(
+            int(left_state.get("next_action_repeat_count", 0) or 0),
+            int(right_state.get("next_action_repeat_count", 0) or 0),
+        ),
+        "binding_scope": str(right_state.get("binding_scope", "")).strip() or str(left_state.get("binding_scope", "")).strip(),
+        "bound_workdir": str(right_state.get("bound_workdir", "")).strip() or str(left_state.get("bound_workdir", "")).strip(),
+        "bound_remote_workdir": str(right_state.get("bound_remote_workdir", "")).strip()
+        or str(left_state.get("bound_remote_workdir", "")).strip(),
+        "proposal_path": str(right_state.get("proposal_path", "")).strip() or str(left_state.get("proposal_path", "")).strip(),
+        "proposal_source": str(right_state.get("proposal_source", "")).strip()
+        or str(left_state.get("proposal_source", "")).strip(),
+        "proposal_owner": bool(right_state.get("proposal_owner", False) or left_state.get("proposal_owner", False)),
+        "closeout_proposal_dir": str(right_state.get("closeout_proposal_dir", "")).strip()
+        or str(left_state.get("closeout_proposal_dir", "")).strip(),
+        "closeout_proposal_dir_source": str(right_state.get("closeout_proposal_dir_source", "")).strip()
+        or str(left_state.get("closeout_proposal_dir_source", "")).strip(),
+        "project_history_file": str(right_state.get("project_history_file", "")).strip()
+        or str(left_state.get("project_history_file", "")).strip(),
+        "project_history_file_source": str(right_state.get("project_history_file_source", "")).strip()
+        or str(left_state.get("project_history_file_source", "")).strip(),
+        "handoff_file": str(right_state.get("handoff_file", "")).strip() or str(left_state.get("handoff_file", "")).strip(),
+        "handoff_source": str(right_state.get("handoff_source", "")).strip() or str(left_state.get("handoff_source", "")).strip(),
     }
 
 
@@ -6186,6 +6337,9 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
         processed.append({"followup_key": followup_key, "action": "resolved_rebound_to_existing"})
         return processed
     spec_for_resume = build_followup_resume_spec_from_payload(followup)
+    resume_session_id = str(spec_for_resume.get("codex_session_id", "")).strip()
+    if resume_session_id:
+        spec_for_resume["current_session_state"] = continuous_research_session_state(config, resume_session_id)
     task_id = normalize_task_id(str(followup.get("task_id", "")).strip())
     entry_count = 0
     if is_queued_feedback:
@@ -9326,12 +9480,13 @@ def unified_execution_closure_lines() -> list[str]:
     return [
         "",
         "这一轮默认使用统一 execution 上下文：结果回流吸收、代码和数据审计、局部修复、proposal/history 滚动写回、实验包准备与提交尽量在同一轮完成。",
+        "这一轮的收束目标只有两个：把实验包补到可提交，或者把 closeout 证据写扎实；不要把同一条思路无穷拆成更小的下一步。",
         "本轮决策顺序：",
         "1. 先吸收结果回流 / summary / report / log / 结果文件，提炼关键数字、异常点和它们意味着什么。",
         "2. 只要结果、日志、参数、样本数、吞吐或显存异常，或者和 history、文献、官方推荐参数冲突，就先审代码、数据、配置、split 与运行完整性。",
         "3. 当前上下文里能完成的局部修复、数据处理、smoke 前置和实验包补齐，直接在这一轮做完。",
         "4. 把可靠结论、失败边界、关键诊断与下一步明确动作及时写回 proposal/history，写得让三天后的你和下一位 agent 都能看懂。",
-        "5. 只有当实验包已经可执行、可审计，而且确实需要 GPU / remote / 长等待时，才提交 taskboard 任务。",
+        "5. 如果实验包已经可执行、可审计，而且确实需要 GPU / remote / 长等待，就提交 taskboard 任务；如果剩余本地动作已不足以改变结论边界、关键风险判断或实验就绪度，就写清理由并准备 closeout。",
     ]
 
 
@@ -9350,7 +9505,7 @@ def build_unified_execution_prompt(
         [
             "",
             *prompt_block_lines("execution_scene_intro"),
-            "没有人工干预时，你需要比较几条备选路径，主动选择当前信息增益最高的一步，并说明为什么这样选。",
+            "没有人工干预时，你需要比较几条备选路径，主动选择当前信息增益最高、且最能把这一轮推向明确出口的一步，并说明为什么这样选。",
             (
                 f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
                 if normalized_trigger_signal
@@ -9397,6 +9552,7 @@ def build_unified_execution_prompt(
             ]
         )
         lines.extend([f"- {hint}" for hint in manual_gate_hints])
+    lines.extend(execution_repeat_guard_lines(spec, next_action_hint))
     lines.extend(unified_execution_closure_lines())
     lines.extend(
         execution_followthrough_instruction_lines(
@@ -9551,7 +9707,7 @@ def build_continuous_transition_prompt(spec: dict[str, Any], *, trigger_signal: 
     submit_line = submit_binding_instruction_line(spec)
     if submit_line:
         lines.append(f"- {submit_line}")
-    lines.append("- closeout 期间如果你发现还有一小步低风险、高信息增益、并且当前上下文里就能完成的动作，不要硬收口，说明理由后回到 execution。")
+    lines.append("- 只有当你发现某个当前上下文里就能完成的动作会直接改变结论、显著降低关键不确定性，或者把实验包从不可提交变为可提交时，才允许退出 closeout 回到 execution。")
     lines.extend(["", *taskboard_footer_contract_lines()])
     return join_prompt_lines(lines)
 
@@ -11117,6 +11273,35 @@ def latest_continuous_research_anchor_spec(
             continue
         candidates.append((task_state_recency_key(state), spec))
     if not candidates:
+        session_state = continuous_research_session_state(config, normalized_session_id)
+        if not session_state:
+            return None
+        fallback_spec = {
+            "task_id": "",
+            "task_key": "",
+            "codex_session_id": normalized_session_id,
+            "agent_name": str(session_state.get("agent_name", "")).strip(),
+            "workdir": str(session_state.get("bound_workdir", "")).strip(),
+            "remote_workdir": str(session_state.get("bound_remote_workdir", "")).strip(),
+            "proposal_path": str(session_state.get("proposal_path", "")).strip(),
+            "proposal_source": str(session_state.get("proposal_source", "")).strip(),
+            "proposal_owner": bool(session_state.get("proposal_owner", False)),
+            "closeout_proposal_dir": str(session_state.get("closeout_proposal_dir", "")).strip(),
+            "closeout_proposal_dir_source": str(session_state.get("closeout_proposal_dir_source", "")).strip(),
+            "project_history_file": str(session_state.get("project_history_file", "")).strip(),
+            "project_history_file_source": str(session_state.get("project_history_file_source", "")).strip(),
+            "handoff_file": str(session_state.get("handoff_file", "")).strip(),
+            "handoff_source": str(session_state.get("handoff_source", "")).strip(),
+            "execution_mode": "session_stage",
+            "current_session_state": dict(session_state),
+        }
+        if should_schedule_followup_for_spec(fallback_spec) and (
+            str(fallback_spec.get("workdir", "")).strip()
+            or str(fallback_spec.get("proposal_path", "")).strip()
+            or str(fallback_spec.get("project_history_file", "")).strip()
+            or str(fallback_spec.get("handoff_file", "")).strip()
+        ):
+            return fallback_spec
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
@@ -11335,15 +11520,8 @@ def effective_wait_state_for_session(
     if should_inherit_recent_next_action(session_state, next_action_hint or {}):
         return ""
     waiting_state = canonicalize_taskboard_signal(str(session_state.get("waiting_state", "")).strip())
-    if waiting_state == "none":
-        waiting_state = ""
-    if waiting_state:
+    if waiting_state in {WAITING_ON_ASYNC_SIGNAL, WAITING_ON_FEEDBACK_SIGNAL}:
         return waiting_state
-    last_signal = canonicalize_taskboard_signal(str(session_state.get("last_signal", "")).strip())
-    if last_signal == "none":
-        last_signal = ""
-    if last_signal in PARKED_IDLE_SIGNALS or last_signal == WAITING_ON_ASYNC_SIGNAL:
-        return last_signal
     return ""
 
 
@@ -11725,27 +11903,18 @@ def continuous_session_reminder_schedule_params(
     if bool((next_action_hint or {}).get("dispatch_ready", False)):
         return {
             "reason": PROPOSAL_MATERIALIZATION_REASON,
-            "delay_seconds": 0,
+            "delay_seconds": continuous_session_reminder_delay_seconds(config, session_id, spec),
             "interval_seconds": DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS,
-            "min_idle_seconds": 0,
+            "min_idle_seconds": DEFAULT_CONTINUOUS_RESEARCH_MIN_IDLE_SECONDS,
             "last_signal": EXECUTION_READY_SIGNAL,
         }
     if should_inherit_recent_next_action(current_state, next_action_hint or {}):
         return {
             "reason": CONTINUOUS_RESEARCH_NEXT_ACTION_REASON,
-            "delay_seconds": 0,
+            "delay_seconds": continuous_session_reminder_delay_seconds(config, session_id, spec),
             "interval_seconds": DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS,
-            "min_idle_seconds": 0,
+            "min_idle_seconds": DEFAULT_CONTINUOUS_RESEARCH_MIN_IDLE_SECONDS,
             "last_signal": str(current_state.get("last_signal", "") or normalized_waiting_state).strip(),
-        }
-    if parked_watchdog_due and normalized_waiting_state in PARKED_IDLE_SIGNALS:
-        parked_interval_seconds = continuous_session_parked_watchdog_interval_seconds(current_state)
-        return {
-            "reason": CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON,
-            "delay_seconds": 0,
-            "interval_seconds": parked_interval_seconds,
-            "min_idle_seconds": 0,
-            "last_signal": normalized_waiting_state,
         }
     return {
         "reason": CONTINUOUS_RESEARCH_IDLE_REASON,
@@ -11814,138 +11983,48 @@ def ensure_continuous_research_session_reminders(config: AppConfig) -> list[dict
             processed.append({"session_id": session_id, "action": "continuous_session_reminder_skipped_no_anchor"})
             continue
         session_state = continuous_research_session_state(config, session_id)
-        waiting_state = str(session_state.get("waiting_state", "")).strip()
+        waiting_state = canonicalize_taskboard_signal(str(session_state.get("waiting_state", "")).strip())
+        if waiting_state == "none":
+            waiting_state = ""
         next_action_hint = session_continuation_hint(config, session_id, spec=anchor_spec, states=states)
         anchor_spec_with_hint = {
             **anchor_spec,
             "controller_continuation_hint": dict(next_action_hint),
         } if next_action_hint.get("action_text") else dict(anchor_spec)
         parked_watchdog_due = False
-        if waiting_state in PARKED_IDLE_SIGNALS:
-            current_token = continuous_research_session_evidence_token(
+        live_snapshot = continuous_session_live_task_snapshot(config, session_id, states=states)
+        awaiting_feedback = int(live_snapshot.get("awaiting_feedback_task_count", 0) or 0) > 0
+        stale_waiting = (
+            waiting_state == WAITING_ON_ASYNC_SIGNAL
+            or waiting_state == WAITING_ON_FEEDBACK_SIGNAL and not awaiting_feedback
+        )
+        if waiting_state and waiting_state not in {WAITING_ON_ASYNC_SIGNAL, WAITING_ON_FEEDBACK_SIGNAL}:
+            stale_waiting = True
+        if stale_waiting:
+            evidence_token = continuous_research_session_evidence_token(
                 config,
                 session_id,
                 spec=anchor_spec,
                 states=states,
             )
-            waiting_token = str(session_state.get("waiting_evidence_token", "")).strip()
-            parked_watchdog_due = continuous_session_parked_watchdog_due(session_state, now_ts=now_ts)
-            parked_wait_age_seconds = continuous_session_parked_wait_age_seconds(session_state, now_ts=now_ts)
-            if waiting_token and waiting_token == current_token and not parked_watchdog_due:
-                if should_inherit_recent_next_action(session_state, next_action_hint):
-                    clear_continuous_research_session_waiting_state(
-                        config,
-                        codex_session_id=session_id,
-                        evidence_token=current_token,
-                        last_signal=LOCAL_MICROSTEP_BATCH_SIGNAL,
-                        stable_idle_repeat_count=max(0, int(session_state.get("stable_idle_repeat_count", 0) or 0)),
-                        updated_by="dispatcher",
-                        source="continuous-session-reminder-next-action-unpark",
-                    )
-                    session_state = continuous_research_session_state(config, session_id)
-                    schedule_params = continuous_session_reminder_schedule_params(
-                        config,
-                        session_id,
-                        anchor_spec_with_hint,
-                        session_state=session_state,
-                        waiting_state=waiting_state,
-                        parked_watchdog_due=False,
-                        next_action_hint=next_action_hint,
-                    )
-                    followup_key = continuous_session_followup_key_for(session_id)
-                    schedule_continuous_session_reminder(
-                        config,
-                        session_id=session_id,
-                        spec=anchor_spec_with_hint,
-                        reason=str(schedule_params.get("reason", CONTINUOUS_RESEARCH_NEXT_ACTION_REASON)),
-                        delay_seconds=int(schedule_params.get("delay_seconds", 0) or 0),
-                        interval_seconds=int(schedule_params.get("interval_seconds", DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS) or 0),
-                        min_idle_seconds=int(schedule_params.get("min_idle_seconds", 0) or 0),
-                        last_signal=str(schedule_params.get("last_signal", "")).strip(),
-                    )
-                    live_followups.append(
-                        {
-                            "followup_key": followup_key,
-                            "followup_type": CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE,
-                            "codex_session_id": session_id,
-                        }
-                    )
-                    processed.append(
-                        {
-                            "session_id": session_id,
-                            "task_id": str(anchor_spec.get("task_id", "")),
-                            "followup_key": followup_key,
-                            "action": "continuous_session_reminder_scheduled_next_action",
-                            "reason": str(schedule_params.get("reason", CONTINUOUS_RESEARCH_NEXT_ACTION_REASON)),
-                            "next_action_hash": str(next_action_hint.get("action_hash", "")),
-                        }
-                    )
-                    continue
-                parked_watchdog_interval_seconds = continuous_session_parked_watchdog_interval_seconds(session_state)
-                parked_watchdog_delay_seconds = continuous_session_parked_watchdog_pending_delay_seconds(
-                    session_state,
-                    now_ts=now_ts,
-                )
-                followup_key = continuous_session_followup_key_for(session_id)
-                schedule_continuous_session_reminder(
-                    config,
-                    session_id=session_id,
-                    spec=anchor_spec_with_hint,
-                    reason=CONTINUOUS_RESEARCH_PARKED_WATCHDOG_REASON,
-                    delay_seconds=parked_watchdog_delay_seconds,
-                    interval_seconds=parked_watchdog_interval_seconds,
-                    min_idle_seconds=0,
-                    last_signal=waiting_state,
-                )
-                live_followups.append(
-                    {
-                        "followup_key": followup_key,
-                        "followup_type": CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE,
-                        "codex_session_id": session_id,
-                    }
-                )
-                processed.append(
-                    {
-                        "session_id": session_id,
-                        "task_id": str(anchor_spec.get("task_id", "")),
-                        "followup_key": followup_key,
-                        "action": "continuous_session_reminder_scheduled_parked_watchdog_pending",
-                        "waiting_state": waiting_state,
-                        "parked_wait_age_seconds": parked_wait_age_seconds,
-                        "parked_watchdog_delay_seconds": parked_watchdog_delay_seconds,
-                        "parked_watchdog_interval_seconds": parked_watchdog_interval_seconds,
-                    }
-                )
-                continue
-            if waiting_token and waiting_token == current_token and parked_watchdog_due:
-                parked_watchdog_interval_seconds = continuous_session_parked_watchdog_interval_seconds(session_state)
-                processed.append(
-                    {
-                        "session_id": session_id,
-                        "task_id": str(anchor_spec.get("task_id", "")),
-                        "action": "continuous_session_reminder_parked_watchdog_due",
-                        "waiting_state": waiting_state,
-                        "parked_wait_age_seconds": parked_wait_age_seconds,
-                        "parked_watchdog_interval_seconds": parked_watchdog_interval_seconds,
-                    }
-                )
-            else:
-                clear_continuous_research_session_waiting_state(
-                    config,
-                    codex_session_id=session_id,
-                    evidence_token=current_token,
-                    last_signal=waiting_state,
-                    updated_by="dispatcher",
-                    source="continuous-session-reminder-unparked",
-                )
-                processed.append(
-                    {
-                        "session_id": session_id,
-                        "task_id": str(anchor_spec.get("task_id", "")),
-                        "action": "continuous_session_parked_idle_cleared",
-                        "waiting_state": waiting_state,
-                    }
-                )
+            clear_continuous_research_session_waiting_state(
+                config,
+                codex_session_id=session_id,
+                evidence_token=evidence_token,
+                last_signal=EXECUTION_READY_SIGNAL if should_inherit_recent_next_action(session_state, next_action_hint) else waiting_state,
+                updated_by="dispatcher",
+                source="continuous-session-reminder-clear-stale-waiting",
+            )
+            session_state = continuous_research_session_state(config, session_id)
+            processed.append(
+                {
+                    "session_id": session_id,
+                    "task_id": str(anchor_spec.get("task_id", "")),
+                    "action": "continuous_session_stale_waiting_cleared",
+                    "waiting_state": waiting_state,
+                }
+            )
+            waiting_state = ""
         followup_key = continuous_session_followup_key_for(session_id)
         schedule_params = continuous_session_reminder_schedule_params(
             config,
@@ -13275,6 +13354,11 @@ def command_doctor(args: argparse.Namespace) -> int:
     config = build_config(args)
     ensure_dir(config.app_home)
     include_legacy = legacy_reads_enabled()
+    resolved_api_port, resolved_api_port_source = resolve_api_service_port(
+        config,
+        requested_port=AUTO_API_PORT_SENTINEL,
+        bind=DEFAULT_API_BIND,
+    )
     checks = {
         "codex_bin": shutil_which(config.codex_bin),
         "tmux_bin": shutil_which(config.tmux_bin),
@@ -13294,9 +13378,34 @@ def command_doctor(args: argparse.Namespace) -> int:
         "executor_registry_entries": sorted(load_executor_registry(config).keys()),
         "api_token_registry_path": str(api_token_registry_path(config)),
         "api_token_count": len(load_api_token_registry(config)),
+        "resolved_api_port": resolved_api_port,
+        "resolved_api_port_source": resolved_api_port_source,
+        "resolved_api_url": api_url_text(bind=DEFAULT_API_BIND, port=resolved_api_port),
     }
     print(json.dumps(checks, ensure_ascii=False, indent=2))
     return 0 if checks["codex_bin"] and checks["tmux_bin"] and checks["thread_db"] else 1
+
+
+def command_api_url(args: argparse.Namespace) -> int:
+    config = build_config(args)
+    bind = str(args.bind or DEFAULT_API_BIND).strip() or DEFAULT_API_BIND
+    port, source = resolve_api_service_port(
+        config,
+        requested_port=getattr(args, "port", AUTO_API_PORT_SENTINEL),
+        bind=bind,
+    )
+    url = api_url_text(bind=bind, port=port, host=str(getattr(args, "host", "") or "").strip())
+    payload = {
+        "bind": bind,
+        "port": port,
+        "source": source,
+        "url": url,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(url)
+    return 0
 
 
 def command_list_threads(args: argparse.Namespace) -> int:
@@ -13943,6 +14052,96 @@ def current_system_group_name() -> str:
         return current_system_user_name()
 
 
+def api_port_state_path(config: AppConfig) -> Path:
+    return config.app_home / API_PORT_STATE_FILE_NAME
+
+
+def read_persisted_api_port(config: AppConfig) -> int:
+    payload = read_json(api_port_state_path(config), {})
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        port = int(payload.get("port", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return port if port > 0 else 0
+
+
+def persist_api_port(config: AppConfig, *, port: int, bind: str, source: str) -> None:
+    ensure_dir(config.app_home)
+    atomic_write_json(
+        api_port_state_path(config),
+        {
+            "version": 1,
+            "port": int(port),
+            "bind": str(bind or "").strip(),
+            "source": str(source or "").strip(),
+            "updated_at": utc_now(),
+        },
+    )
+
+
+def stable_default_api_port(config: AppConfig) -> int:
+    digest = hashlib.sha1(str(config.app_home).encode("utf-8")).hexdigest()
+    return DEFAULT_API_PORT_BASE + (int(digest[:8], 16) % DEFAULT_API_PORT_SPAN)
+
+
+def resolve_api_service_port(
+    config: AppConfig,
+    *,
+    requested_port: int | None = None,
+    bind: str = DEFAULT_API_BIND,
+    environ: Any | None = None,
+    persist: bool = True,
+) -> tuple[int, str]:
+    if requested_port is not None:
+        normalized_requested_port = int(requested_port or 0)
+        if normalized_requested_port > 0:
+            if persist:
+                persist_api_port(config, port=normalized_requested_port, bind=bind, source="arg")
+            return normalized_requested_port, "arg"
+    source_env = environ if environ is not None else os.environ
+    env_value = str(source_env.get(API_PORT_ENV_KEY, "") or "").strip()
+    if env_value:
+        try:
+            env_port = int(env_value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {API_PORT_ENV_KEY}: {env_value}") from exc
+        if env_port > 0:
+            if persist:
+                persist_api_port(config, port=env_port, bind=bind, source="env")
+            return env_port, "env"
+    persisted_port = read_persisted_api_port(config)
+    if persisted_port > 0:
+        return persisted_port, "stored"
+    candidate_sources: list[tuple[int, str]] = [
+        (stable_default_api_port(config), "auto_hash"),
+    ]
+    seen_ports = {port for port, _source in candidate_sources}
+    for base_port, source in candidate_sources:
+        if can_bind_tcp_port(bind, base_port):
+            if persist:
+                persist_api_port(config, port=base_port, bind=bind, source=source)
+            return base_port, source
+        for offset in range(1, DEFAULT_API_PORT_SCAN_LIMIT + 1):
+            candidate = base_port + offset
+            if candidate <= 0 or candidate > 65535 or candidate in seen_ports:
+                continue
+            if not can_bind_tcp_port(bind, candidate):
+                continue
+            if persist:
+                persist_api_port(config, port=candidate, bind=bind, source=f"{source}_scan")
+            return candidate, f"{source}_scan"
+    raise RuntimeError(f"Could not resolve a free API port for bind={bind}")
+
+
+def api_url_text(*, bind: str, port: int, host: str = "") -> str:
+    visible_host = str(host or "").strip()
+    if not visible_host:
+        visible_host = "127.0.0.1" if bind in {"", "0.0.0.0", "::"} else str(bind)
+    return f"http://{visible_host}:{int(port)}"
+
+
 def managed_service_specs(
     config: AppConfig,
     *,
@@ -14051,7 +14250,12 @@ def serve_dispatcher_with_config(
 
 def command_serve_api(args: argparse.Namespace) -> int:
     config = build_config(args)
-    return serve_api_with_config(config, bind=args.bind, port=args.port)
+    resolved_port, _source = resolve_api_service_port(
+        config,
+        requested_port=args.port,
+        bind=args.bind,
+    )
+    return serve_api_with_config(config, bind=args.bind, port=resolved_port)
 
 
 def command_dispatch(args: argparse.Namespace) -> int:
@@ -14084,10 +14288,15 @@ def command_serve(args: argparse.Namespace) -> int:
 
 def command_service_run(args: argparse.Namespace) -> int:
     config = build_config(args)
+    resolved_api_port, _source = resolve_api_service_port(
+        config,
+        requested_port=getattr(args, "port", AUTO_API_PORT_SENTINEL),
+        bind=getattr(args, "bind", DEFAULT_SERVICE_API_BIND),
+    )
     specs = managed_service_specs(
         config,
         api_bind=getattr(args, "bind", DEFAULT_SERVICE_API_BIND),
-        api_port=getattr(args, "port", DEFAULT_API_PORT),
+        api_port=resolved_api_port,
         dispatcher_mode=getattr(args, "mode", DEFAULT_SERVICE_DISPATCHER_MODE),
         dispatcher_gpu_count=getattr(args, "gpu_count", DEFAULT_SERVICE_GPU_COUNT),
         dispatcher_cpu_thread_limit=getattr(args, "cpu_thread_limit", DEFAULT_CPU_THREAD_LIMIT),
@@ -14103,9 +14312,9 @@ def command_service_run(args: argparse.Namespace) -> int:
                 "entrypoint_path": str(default_entrypoint_path()),
                 "working_directory": str(repo_root()),
                 "bind": args.bind,
-                "port": int(args.port),
+                "port": int(resolved_api_port),
             },
-            run=lambda: serve_api_with_config(config, bind=args.bind, port=args.port),
+            run=lambda: serve_api_with_config(config, bind=args.bind, port=resolved_api_port),
         )
     spec = specs["dispatcher"]
     return run_managed_service(
@@ -14138,10 +14347,15 @@ def command_service_run(args: argparse.Namespace) -> int:
 
 def command_service_doctor(args: argparse.Namespace) -> int:
     config = build_config(args)
+    resolved_api_port, _source = resolve_api_service_port(
+        config,
+        requested_port=args.api_port,
+        bind=args.api_bind,
+    )
     specs = managed_service_specs(
         config,
         api_bind=args.api_bind,
-        api_port=args.api_port,
+        api_port=resolved_api_port,
         dispatcher_mode=args.dispatcher_mode,
         dispatcher_gpu_count=args.dispatcher_gpu_count,
         dispatcher_cpu_thread_limit=args.dispatcher_cpu_thread_limit,
@@ -14161,10 +14375,15 @@ def command_service_doctor(args: argparse.Namespace) -> int:
 
 def command_service_print_systemd(args: argparse.Namespace) -> int:
     config = build_config(args)
+    resolved_api_port, _source = resolve_api_service_port(
+        config,
+        requested_port=args.api_port,
+        bind=args.api_bind,
+    )
     specs = managed_service_specs(
         config,
         api_bind=args.api_bind,
-        api_port=args.api_port,
+        api_port=resolved_api_port,
         dispatcher_mode=args.dispatcher_mode,
         dispatcher_gpu_count=args.dispatcher_gpu_count,
         dispatcher_cpu_thread_limit=args.dispatcher_cpu_thread_limit,
@@ -14460,6 +14679,8 @@ def sample_prompt_preview_spec() -> dict[str, Any]:
         "closeout_proposal_dir_source": "explicit",
         "project_history_file": "/home/Awei/project/docs/HISTORY.md",
         "project_history_file_source": "explicit",
+        "handoff_file": "/home/Awei/project/docs/HANDOFF.md",
+        "handoff_source": "explicit",
     }
 
 
@@ -14525,6 +14746,217 @@ def command_prompt_preview(args: argparse.Namespace) -> int:
     else:
         prompt = build_resume_prompt(spec, event, continuous_research_enabled=args.continuous)
     print(f"# prompt_source: {active_prompt_source()}")
+    print(prompt)
+    return 0
+
+
+def resolve_enter_stage_session_id(config: AppConfig, raw_session_id: str = "") -> tuple[str, str]:
+    normalized_session_id = str(raw_session_id or "").strip()
+    if normalized_session_id:
+        return normalized_session_id, "arg"
+    env_session_id, env_key = resolve_current_codex_session_id(os.environ)
+    if env_session_id:
+        return env_session_id, env_key or "env"
+    payload = current_thread_info(config)
+    if payload is not None:
+        session_id = str(payload.get("current_codex_session_id", "")).strip()
+        if session_id:
+            return session_id, str(payload.get("resolved_from", "") or "current_thread")
+    return "", ""
+
+
+def default_trigger_signal_for_stage(stage: str, explicit_signal: str = "") -> str:
+    if str(explicit_signal or "").strip():
+        return canonicalize_taskboard_signal(str(explicit_signal or "").strip()) or str(explicit_signal or "").strip()
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage == "execution":
+        return EXECUTION_READY_SIGNAL
+    if normalized_stage == "closeout":
+        return CLOSEOUT_READY_SIGNAL
+    return ""
+
+
+def build_enter_stage_spec(
+    config: AppConfig,
+    *,
+    stage: str,
+    session_id: str,
+    workdir: str,
+    agent_name: str,
+    raw_proposal: Any,
+    raw_closeout_proposal_dir: Any,
+    raw_project_history_file: Any,
+    raw_handoff_file: Any,
+) -> dict[str, Any]:
+    spec: dict[str, Any] = {
+        "workdir": workdir,
+        "codex_session_id": session_id,
+        "feedback_mode": "auto",
+        "agent_name": agent_name,
+        "task_id": "",
+        "task_key": "",
+        "execution_mode": "session_stage",
+    }
+    if raw_proposal is not MISSING:
+        spec["proposal"] = raw_proposal
+    if raw_closeout_proposal_dir is not MISSING:
+        spec["closeout_proposal_dir"] = raw_closeout_proposal_dir
+    if raw_project_history_file is not MISSING:
+        spec["project_history_file"] = raw_project_history_file
+    resolved = apply_local_submission_context(config, spec)
+    bound_context = (
+        session_bound_context(config, codex_session_id=session_id, workdir=workdir, remote_workdir="")
+        if session_id
+        else {}
+    )
+    handoff_file = (
+        normalize_handoff_file(raw_handoff_file, workdir=workdir)
+        if raw_handoff_file is not MISSING
+        else str(bound_context.get("handoff_file", "")).strip()
+    )
+    if handoff_file:
+        resolved["handoff_file"] = handoff_file
+        resolved["handoff_source"] = "explicit" if raw_handoff_file is not MISSING else str(bound_context.get("handoff_source", "")).strip() or "session_binding"
+    elif raw_handoff_file is not MISSING:
+        resolved["handoff_file"] = ""
+        resolved["handoff_source"] = "explicit_clear"
+    current_session_state = continuous_research_session_state(config, session_id) if session_id else {}
+    resolved["current_session_state"] = current_session_state
+    resolved["research_phase"] = str(stage or "").strip().lower()
+    return resolved
+
+
+def bind_session_stage(
+    config: AppConfig,
+    *,
+    session_id: str,
+    stage: str,
+    trigger_signal: str,
+    spec: dict[str, Any],
+    automation_mode_name: str,
+) -> dict[str, Any]:
+    normalized_workdir = normalize_session_guard_workdir(str(spec.get("workdir", "")).strip())
+    normalized_remote_workdir = normalize_posix_workdir(str(spec.get("remote_workdir", "")).strip())
+    binding_scope = proposal_scope_key(workdir=normalized_workdir, remote_workdir=normalized_remote_workdir)
+    session_payload = update_continuous_research_session_state(
+        config,
+        codex_session_id=session_id,
+        updated_by="cli",
+        source=f"enter-stage:{stage}",
+        waiting_state="",
+        waiting_reason="",
+        waiting_since="",
+        waiting_evidence_token="",
+        research_phase=stage,
+        last_signal=trigger_signal,
+        binding_scope=binding_scope,
+        bound_workdir=normalized_workdir,
+        bound_remote_workdir=normalized_remote_workdir,
+        proposal_path=str(spec.get("proposal_path", "")).strip(),
+        proposal_source=str(spec.get("proposal_source", "")).strip(),
+        proposal_owner=bool(spec.get("proposal_owner", False)),
+        closeout_proposal_dir=str(spec.get("closeout_proposal_dir", "")).strip(),
+        closeout_proposal_dir_source=str(spec.get("closeout_proposal_dir_source", "")).strip(),
+        project_history_file=str(spec.get("project_history_file", "")).strip(),
+        project_history_file_source=str(spec.get("project_history_file_source", "")).strip(),
+        handoff_file=str(spec.get("handoff_file", "")).strip(),
+        handoff_source=str(spec.get("handoff_source", "")).strip(),
+    )
+    if automation_mode_name in {"managed", "continuous"}:
+        session_payload = set_automation_mode(
+            config,
+            mode=automation_mode_name,
+            codex_session_id=session_id,
+            updated_by="cli",
+            source=f"enter-stage:{stage}:{automation_mode_name}",
+        )
+    return session_payload
+
+
+def render_enter_stage_prompt(
+    spec: dict[str, Any],
+    *,
+    stage: str,
+    trigger_signal: str,
+    successor_bootstrap: bool,
+    predecessor_session_id: str,
+) -> str:
+    if stage == "planning":
+        if successor_bootstrap:
+            return build_successor_bootstrap_prompt(
+                spec,
+                predecessor_session_id=predecessor_session_id,
+                trigger_signal=trigger_signal or "none",
+            )
+        return build_continuous_planning_prompt(spec, trigger_signal=trigger_signal)
+    if stage == "closeout":
+        return build_continuous_transition_prompt(spec, trigger_signal=trigger_signal)
+    return build_unified_execution_prompt(spec, trigger_signal=trigger_signal)
+
+
+def command_enter_stage(args: argparse.Namespace) -> int:
+    config = build_config(args)
+    stage = str(args.stage or "").strip().lower()
+    workdir = normalize_session_guard_workdir(str(args.workdir or os.environ.get("PWD", "") or Path.cwd()))
+    agent_name = str(args.agent_name or os.environ.get("CODEX_AGENT_NAME", "")).strip()
+    bind_requested = not bool(getattr(args, "no_bind", False)) or str(getattr(args, "automation_mode", "keep")).strip() != "keep"
+    session_id, resolved_from = resolve_enter_stage_session_id(config, getattr(args, "codex_session_id", ""))
+    if bind_requested and not session_id:
+        print("Missing codex session id for enter-stage binding. Run inside a Codex session or pass --session-id.", file=sys.stderr)
+        return 1
+    spec = build_enter_stage_spec(
+        config,
+        stage=stage,
+        session_id=session_id,
+        workdir=workdir,
+        agent_name=agent_name,
+        raw_proposal=(getattr(args, "proposal", MISSING) if getattr(args, "proposal", None) is not None else MISSING),
+        raw_closeout_proposal_dir=(
+            getattr(args, "closeout_proposal_dir", MISSING)
+            if getattr(args, "closeout_proposal_dir", None) is not None
+            else MISSING
+        ),
+        raw_project_history_file=(
+            getattr(args, "project_history_file", MISSING)
+            if getattr(args, "project_history_file", None) is not None
+            else MISSING
+        ),
+        raw_handoff_file=(getattr(args, "handoff_file", MISSING) if getattr(args, "handoff_file", None) is not None else MISSING),
+    )
+    trigger_signal = default_trigger_signal_for_stage(stage, getattr(args, "trigger_signal", ""))
+    automation_mode_name = str(getattr(args, "automation_mode", "keep") or "keep").strip().lower()
+    session_payload: dict[str, Any] | None = None
+    if bind_requested and session_id:
+        session_payload = bind_session_stage(
+            config,
+            session_id=session_id,
+            stage=stage,
+            trigger_signal=trigger_signal,
+            spec=spec,
+            automation_mode_name=automation_mode_name,
+        )
+        spec["current_session_state"] = continuous_research_session_state(config, session_id)
+    prompt = render_enter_stage_prompt(
+        spec,
+        stage=stage,
+        trigger_signal=trigger_signal,
+        successor_bootstrap=bool(getattr(args, "successor_bootstrap", False)),
+        predecessor_session_id=str(getattr(args, "predecessor_session_id", "") or "").strip(),
+    )
+    if getattr(args, "json", False):
+        payload = {
+            "ok": True,
+            "stage": stage,
+            "prompt_source": active_prompt_source(),
+            "prompt": prompt,
+            "bind_requested": bind_requested,
+            "target_codex_session_id": session_id,
+            "resolved_from": resolved_from,
+            "automation_mode": automation_mode_name if automation_mode_name != "keep" else automation_mode_label(config, codex_session_id=session_id) if session_id else "managed",
+            "session_state": session_payload.get("target_session_state", {}) if isinstance(session_payload, dict) else spec.get("current_session_state", {}),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
     print(prompt)
     return 0
 
@@ -16889,7 +17321,7 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
 
 def add_service_template_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-bind", default=DEFAULT_SERVICE_API_BIND)
-    parser.add_argument("--api-port", type=int, default=DEFAULT_API_PORT)
+    parser.add_argument("--api-port", type=int, default=AUTO_API_PORT_SENTINEL)
     parser.add_argument("--dispatcher-mode", choices=["serial", "gpu-fill"], default=DEFAULT_SERVICE_DISPATCHER_MODE)
     parser.add_argument("--dispatcher-gpu-count", type=int, default=DEFAULT_SERVICE_GPU_COUNT)
     parser.add_argument("--dispatcher-cpu-thread-limit", type=int, default=DEFAULT_CPU_THREAD_LIMIT)
@@ -16905,6 +17337,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subparsers.add_parser("doctor", help="Check local prerequisites and resolved paths.")
     add_config_args(doctor)
     doctor.set_defaults(func=command_doctor)
+
+    api_url = subparsers.add_parser("api-url", help="Print the resolved taskboard API URL for this app_home.")
+    add_config_args(api_url)
+    api_url.add_argument("--bind", default=DEFAULT_API_BIND)
+    api_url.add_argument("--host", default="")
+    api_url.add_argument("--port", type=int, default=AUTO_API_PORT_SENTINEL)
+    api_url.add_argument("--json", action="store_true")
+    api_url.set_defaults(func=command_api_url)
 
     list_threads = subparsers.add_parser("list-threads", help="List recent Codex session ids from the local state database.")
     add_config_args(list_threads)
@@ -16937,6 +17377,28 @@ def build_parser() -> argparse.ArgumentParser:
     prompt_preview.add_argument("--predecessor-session-id", default="session-closeout-001")
     prompt_preview.add_argument("--continuous", action="store_true")
     prompt_preview.set_defaults(func=command_prompt_preview)
+
+    enter_stage = subparsers.add_parser(
+        "enter-stage",
+        help="Adopt the current or specified Codex session into planning/execution/closeout and print the real prompt.",
+    )
+    add_config_args(enter_stage)
+    enter_stage.add_argument("stage", choices=["planning", "execution", "closeout"])
+    enter_stage.add_argument("--session-id", dest="codex_session_id", default="")
+    enter_stage.add_argument("--codex-session-id", dest="codex_session_id")
+    enter_stage.add_argument("--workdir", default=os.environ.get("PWD", str(Path.cwd())))
+    enter_stage.add_argument("--agent-name", default=os.environ.get("CODEX_AGENT_NAME", ""))
+    enter_stage.add_argument("--proposal")
+    enter_stage.add_argument("--closeout-proposal-dir")
+    enter_stage.add_argument("--project-history-file")
+    enter_stage.add_argument("--handoff-file")
+    enter_stage.add_argument("--trigger-signal", default="")
+    enter_stage.add_argument("--successor-bootstrap", action="store_true")
+    enter_stage.add_argument("--predecessor-session-id", default="")
+    enter_stage.add_argument("--automation-mode", choices=["keep", "managed", "continuous"], default="keep")
+    enter_stage.add_argument("--no-bind", action="store_true")
+    enter_stage.add_argument("--json", action="store_true")
+    enter_stage.set_defaults(func=command_enter_stage)
 
     automation_mode = subparsers.add_parser(
         "automation-mode",
@@ -17281,7 +17743,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_api = subparsers.add_parser("serve-api", help="Expose submit-job/status-result/wait-result over a small authenticated HTTP API.")
     add_config_args(serve_api)
     serve_api.add_argument("--bind", default=DEFAULT_API_BIND)
-    serve_api.add_argument("--port", type=int, default=DEFAULT_API_PORT)
+    serve_api.add_argument("--port", type=int, default=AUTO_API_PORT_SENTINEL)
     serve_api.set_defaults(func=command_serve_api)
 
     service = subparsers.add_parser("service", help="Inspect or run the standardized production service entrypoints.")
@@ -17293,7 +17755,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     service_run_api = service_run_subparsers.add_parser("api", help="Run the managed API service entrypoint.")
     service_run_api.add_argument("--bind", default=DEFAULT_SERVICE_API_BIND)
-    service_run_api.add_argument("--port", type=int, default=DEFAULT_API_PORT)
+    service_run_api.add_argument("--port", type=int, default=AUTO_API_PORT_SENTINEL)
     service_run_api.set_defaults(func=command_service_run, service_name="api")
 
     service_run_dispatcher = service_run_subparsers.add_parser("dispatcher", help="Run the managed dispatcher service entrypoint.")

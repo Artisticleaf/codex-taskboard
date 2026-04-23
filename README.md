@@ -20,9 +20,9 @@
   - 刷新 proposal，并把首个执行包准备到可分发状态。
 - `execution`
   - 在统一上下文中完成 receipt 吸收、代码/数据审计、局部修复、proposal/history 写回、实验包准备与提交。
-  - 当前对话能完成的 CPU-only 工作，不要为了 signal 人为拆步。
+  - 当前对话能完成的 CPU-only 工作，不要为了 signal 人为拆步，但也不要把“还能再做一点”无限拆成更小的下一步；execution 必须收束到“提交真实实验”或“进入 closeout”之一。
 - `closeout`
-  - 只有在 execution 已经明确写出“继续扩展当前 proposal 已无新的信息收益”的分析后才能进入。
+  - 只有在 execution 已经明确写出“剩余本地动作已不足以改变结论边界、关键风险判断或实验就绪度，因此继续扩展当前 proposal 已无足够信息增益”的分析后才能进入。
   - 必须完成 proposal 总结、history 回写、handoff、binding 确认，再由 taskboard 启动下一轮 planning。
 
 ### 公开 signal
@@ -63,10 +63,15 @@ python3 -m venv .venv
 .venv/bin/codex-taskboard automation-mode managed --session-id <codex_session_id>
 .venv/bin/codex-taskboard automation-mode continuous --session-id <codex_session_id>
 
+.venv/bin/codex-taskboard enter-stage planning --proposal /path/to/PROPOSAL.md --project-history-file /path/to/HISTORY.md
+.venv/bin/codex-taskboard enter-stage execution --session-id <codex_session_id>
+.venv/bin/codex-taskboard enter-stage closeout --session-id <codex_session_id> --handoff-file /path/to/HANDOFF.md
+
 .venv/bin/codex-taskboard backlog status --session-id <codex_session_id>
 .venv/bin/codex-taskboard backlog show --session-id <codex_session_id>
 .venv/bin/codex-taskboard backlog clear --session-id <codex_session_id>
 
+.venv/bin/codex-taskboard api-url
 .venv/bin/codex-taskboard prompt-preview --scene planning
 .venv/bin/codex-taskboard prompt-preview --scene execution
 .venv/bin/codex-taskboard prompt-preview --scene closeout

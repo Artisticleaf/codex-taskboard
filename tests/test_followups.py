@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
+import os
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_taskboard.cli import (
     AppConfig,
+    apply_local_submission_context,
     automation_mode_is_managed,
     build_continuous_mode_status_payload,
     build_continuous_planning_prompt,
@@ -14,10 +20,14 @@ from codex_taskboard.cli import (
     build_continuous_transition_prompt,
     build_successor_bootstrap_prompt,
     build_standard_followup_prompt,
+    command_enter_stage,
+    continuous_research_session_state,
     clear_reflow_backlog,
     extract_taskboard_protocol_footer,
     followup_path,
     reflow_backlog_summary,
+    resolve_api_service_port,
+    stable_default_api_port,
     set_automation_mode,
 )
 
@@ -103,8 +113,26 @@ class FollowupTests(unittest.TestCase):
 
         self.assertIn("你现在处于 execution。", prompt)
         self.assertIn("统一 execution 上下文", prompt)
-        self.assertIn("CPU-only 工作", prompt)
+        self.assertIn("明确出口", prompt)
         self.assertIn("TASKBOARD_SIGNAL=WAITING_ON_ASYNC", prompt)
+
+    def test_build_continuous_execution_prompt_adds_repeat_guard_after_repeated_microsteps(self) -> None:
+        prompt = build_continuous_research_prompt(
+            {
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "current_session_state": {
+                    "next_action_repeat_count": 5,
+                },
+            },
+            trigger_signal="EXECUTION_READY",
+        )
+
+        self.assertIn("不要再把它拆成下一小步", prompt)
+        self.assertIn("转入 closeout", prompt)
 
     def test_build_continuous_execution_prompt_scans_manual_gate_hints(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -149,6 +177,7 @@ class FollowupTests(unittest.TestCase):
         self.assertIn("你现在处于 closeout。", prompt)
         self.assertIn("handoff 确认", prompt)
         self.assertIn("强制开启新的 Codex session", prompt)
+        self.assertIn("显著降低关键不确定性", prompt)
 
     def test_build_successor_bootstrap_prompt_forces_new_session_planning(self) -> None:
         prompt = build_successor_bootstrap_prompt(
@@ -184,6 +213,125 @@ class FollowupTests(unittest.TestCase):
 
             self.assertTrue(automation_mode_is_managed(config, codex_session_id="session-001"))
             self.assertFalse(automation_mode_is_managed(config, codex_session_id="session-002"))
+
+    def test_enter_stage_binds_current_session_and_persists_runtime_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_home = Path(tmpdir) / "taskboard-home"
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            proposal_path = project_dir / "PROPOSAL.md"
+            proposal_path.write_text("# proposal\n", encoding="utf-8")
+            history_path = project_dir / "HISTORY.md"
+            history_path.write_text("# history\n", encoding="utf-8")
+            handoff_path = project_dir / "HANDOFF.md"
+            handoff_path.write_text("# handoff\n", encoding="utf-8")
+            closeout_dir = project_dir / "closeout"
+            closeout_dir.mkdir(parents=True, exist_ok=True)
+            args = Namespace(
+                app_home=str(app_home),
+                codex_home=str(app_home / "codex-home"),
+                codex_bin="codex",
+                tmux_bin="tmux",
+                stage="planning",
+                codex_session_id="",
+                workdir=str(project_dir),
+                agent_name="",
+                proposal=str(proposal_path),
+                closeout_proposal_dir=str(closeout_dir),
+                project_history_file=str(history_path),
+                handoff_file=str(handoff_path),
+                trigger_signal="",
+                successor_bootstrap=False,
+                predecessor_session_id="",
+                automation_mode="managed",
+                no_bind=False,
+                json=False,
+            )
+            stdout = io.StringIO()
+            with patch.dict(os.environ, {"CODEX_SESSION_ID": "session-enter-001", "PWD": str(project_dir)}, clear=False):
+                with redirect_stdout(stdout):
+                    exit_code = command_enter_stage(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertIn("你现在处于 planning。", stdout.getvalue())
+            state = continuous_research_session_state(build_config(app_home), "session-enter-001")
+            self.assertEqual(state["proposal_path"], str(proposal_path.resolve()))
+            self.assertEqual(state["project_history_file"], str(history_path.resolve()))
+            self.assertEqual(state["handoff_file"], str(handoff_path.resolve()))
+            self.assertEqual(state["research_phase"], "planning")
+
+    def test_apply_local_submission_context_inherits_bound_stage_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_home = Path(tmpdir) / "taskboard-home"
+            config = build_config(app_home)
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            proposal_path = project_dir / "PROPOSAL.md"
+            proposal_path.write_text("# proposal\n", encoding="utf-8")
+            history_path = project_dir / "HISTORY.md"
+            history_path.write_text("# history\n", encoding="utf-8")
+            closeout_dir = project_dir / "closeout"
+            closeout_dir.mkdir(parents=True, exist_ok=True)
+            args = Namespace(
+                app_home=str(app_home),
+                codex_home=str(app_home / "codex-home"),
+                codex_bin="codex",
+                tmux_bin="tmux",
+                stage="execution",
+                codex_session_id="session-bind-001",
+                workdir=str(project_dir),
+                agent_name="",
+                proposal=str(proposal_path),
+                closeout_proposal_dir=str(closeout_dir),
+                project_history_file=str(history_path),
+                handoff_file=None,
+                trigger_signal="",
+                successor_bootstrap=False,
+                predecessor_session_id="",
+                automation_mode="keep",
+                no_bind=False,
+                json=False,
+            )
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(command_enter_stage(args), 0)
+
+            spec = apply_local_submission_context(
+                config,
+                {
+                    "workdir": str(project_dir),
+                    "codex_session_id": "session-bind-001",
+                    "feedback_mode": "auto",
+                    "agent_name": "",
+                },
+            )
+
+            self.assertEqual(spec["proposal_path"], str(proposal_path.resolve()))
+            self.assertEqual(spec["project_history_file"], str(history_path.resolve()))
+            self.assertEqual(spec["closeout_proposal_dir"], str(closeout_dir.resolve()))
+
+    def test_resolve_api_service_port_picks_stable_free_port_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            stable_port = stable_default_api_port(config)
+            with patch(
+                "codex_taskboard.cli.can_bind_tcp_port",
+                side_effect=lambda bind, port: int(port) == stable_port + 1,
+            ):
+                resolved_port, source = resolve_api_service_port(
+                    config,
+                    requested_port=0,
+                    bind="127.0.0.1",
+                )
+
+            self.assertEqual(resolved_port, stable_port + 1)
+            self.assertEqual(source, "auto_hash_scan")
+            persisted_port, persisted_source = resolve_api_service_port(
+                config,
+                requested_port=0,
+                bind="127.0.0.1",
+            )
+            self.assertEqual(persisted_port, stable_port + 1)
+            self.assertEqual(persisted_source, "stored")
 
     def test_status_payload_and_backlog_summary_surface_reflow_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -12,9 +12,13 @@
 .venv/bin/codex-taskboard automation-mode status --session-id <codex_session_id>
 .venv/bin/codex-taskboard automation-mode managed --session-id <codex_session_id>
 .venv/bin/codex-taskboard automation-mode continuous --session-id <codex_session_id>
+.venv/bin/codex-taskboard enter-stage planning --proposal /path/to/PROPOSAL.md --project-history-file /path/to/HISTORY.md
+.venv/bin/codex-taskboard enter-stage execution --session-id <codex_session_id>
+.venv/bin/codex-taskboard enter-stage closeout --session-id <codex_session_id> --handoff-file /path/to/HANDOFF.md
 .venv/bin/codex-taskboard backlog status --session-id <codex_session_id>
 .venv/bin/codex-taskboard backlog show --session-id <codex_session_id>
 .venv/bin/codex-taskboard backlog clear --session-id <codex_session_id>
+.venv/bin/codex-taskboard api-url
 .venv/bin/codex-taskboard prompt-preview --scene planning
 .venv/bin/codex-taskboard prompt-preview --scene execution
 .venv/bin/codex-taskboard prompt-preview --scene closeout
@@ -37,8 +41,9 @@
   - 读 history / handoff / 文献，刷新 proposal，准备首个执行包。
 - `execution`
   - 在统一上下文内做 receipt 吸收、审计、修复、writeback、提交实验。
+  - execution 需要收束到两个出口之一：真实实验提交，或进入 closeout；不要无限拆成更小的下一步。
 - `closeout`
-  - 证明当前 proposal 已无新的信息收益后，进行总结、history 回写、handoff 与绑定确认。
+  - 证明剩余本地动作已不足以改变结论边界、关键风险判断或实验就绪度后，进行总结、history 回写、handoff 与绑定确认。
 - `protocol-repair`
   - 当 agent 忘记固定尾部协议时发送的极短纠错 prompt。
 

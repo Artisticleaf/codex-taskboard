@@ -3,6 +3,7 @@
 proposal_file: [/home/Awei/project/docs/PROPOSAL.md]
 closeout_proposal_dir: [/home/Awei/project/docs/closeout]
 project_history_file: [/home/Awei/project/docs/HISTORY.md]
+handoff_file: [/home/Awei/project/docs/HANDOFF.md]
 project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
 当前 proposal 以上面的 proposal_file 为准。
 本轮可靠结果、关键诊断结论和下一步明确动作默认先写回当前 proposal；如果主线方向、结论边界或下一阶段入口发生变化，再同步 project_history_file。
@@ -14,7 +15,7 @@ project_history_log_dir: [/home/Awei/project/docs/HISTORY-logs]
 
 先证据，后动作：
 - 先读已经落盘的 summary / report / log / 结果文件，提炼关键数字、异常点和它们意味着什么，再决定当前唯一最高优先级动作。
-- 先把新增证据并回 proposal/history，再判断是继续执行、提交实验，还是进入 closeout。
+- 先把新增证据并回 proposal/history，再判断这一轮应走向哪一个出口：继续补齐到可提交实验，还是进入 closeout。
 
 ===== 合并任务更新 1/1 =====
 任务摘要：

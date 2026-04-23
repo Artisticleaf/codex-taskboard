@@ -69,6 +69,18 @@ def normalize_continuous_research_mode_payload(payload: Any, *, hooks: Automatio
                 "next_action_source_path": str(state.get("next_action_source_path", "")),
                 "next_action_source_updated_at": str(state.get("next_action_source_updated_at", "")),
                 "next_action_repeat_count": max(0, int(state.get("next_action_repeat_count", 0) or 0)),
+                "binding_scope": str(state.get("binding_scope", "")),
+                "bound_workdir": str(state.get("bound_workdir", "")),
+                "bound_remote_workdir": str(state.get("bound_remote_workdir", "")),
+                "proposal_path": str(state.get("proposal_path", "")),
+                "proposal_source": str(state.get("proposal_source", "")),
+                "proposal_owner": hooks.parse_boolish(state.get("proposal_owner", False), default=False),
+                "closeout_proposal_dir": str(state.get("closeout_proposal_dir", "")),
+                "closeout_proposal_dir_source": str(state.get("closeout_proposal_dir_source", "")),
+                "project_history_file": str(state.get("project_history_file", "")),
+                "project_history_file_source": str(state.get("project_history_file_source", "")),
+                "handoff_file": str(state.get("handoff_file", "")),
+                "handoff_source": str(state.get("handoff_source", "")),
             }
     enabled_sessions = sorted(session_id for session_id, state in sessions.items() if bool(state.get("enabled", False)))
     return hooks.normalize_timestamp_fields(
@@ -432,6 +444,14 @@ def bind_continuous_research_mode_session(
             "updated_at": str(current.get("updated_at", "")) or timestamp,
             "updated_by": str(current.get("updated_by", "")) or str(updated_by or "cli"),
             "source": str(current.get("source", "")) or "migrated_from_legacy_global",
+        }
+    elif target_session_id not in sessions:
+        sessions[target_session_id] = {
+            "enabled": False,
+            "mode": "managed",
+            "updated_at": timestamp,
+            "updated_by": str(updated_by or "cli"),
+            "source": str(source or "continuous-mode:bind"),
         }
     payload = {
         "version": 2,
