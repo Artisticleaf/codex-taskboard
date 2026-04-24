@@ -5914,6 +5914,74 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
             merge_task_state(config, task_id, session_flow_state="managed_backlog")
         processed.append({"followup_key": followup_key, "action": "deferred_managed_mode_pause"})
         return processed
+    if is_continuous_transition:
+        cached_message_path = followup_message_path(config, followup_key)
+        cached_message_text = ""
+        if cached_message_path.exists():
+            cached_message_text = cached_message_path.read_text(encoding="utf-8", errors="ignore")
+        cached_signal = canonicalize_taskboard_signal(extract_taskboard_signal(cached_message_text))
+        cached_protocol = extract_taskboard_protocol_footer(cached_message_text) if cached_message_text else {}
+        cached_protocol_ok = bool(cached_protocol.get("valid", False)) and str(cached_protocol.get("self_check", "")).strip() == "pass"
+        if cached_signal == "none" and cached_protocol_ok:
+            transition_session_id = str(followup.get("codex_session_id", "")).strip()
+            cached_resume_spec = build_followup_resume_spec_from_payload(followup)
+            if transition_session_id:
+                clear_continuous_research_session_waiting_state(
+                    config,
+                    codex_session_id=transition_session_id,
+                    evidence_token=continuous_research_session_evidence_token(config, transition_session_id, spec=cached_resume_spec),
+                    last_signal=cached_signal,
+                    updated_by="followup",
+                    source="continuous-transition-cached-closeout",
+                )
+            task_id = normalize_task_id(str(followup.get("task_id", "")).strip())
+            append_followup_event_log(
+                config,
+                event="cached_closeout_consumed",
+                reason="continuous_transition_cached_none",
+                followup=followup,
+                task_id=task_id,
+                detail="use_cached_closeout_message_for_successor_bootstrap",
+            )
+            bootstrap = bootstrap_successor_session_after_closeout(
+                config,
+                task_id=task_id,
+                spec=cached_resume_spec,
+                predecessor_session_id=transition_session_id or str(cached_resume_spec.get("codex_session_id", "")).strip(),
+                resolve_followup_key=followup_key,
+                trigger_signal=cached_signal,
+                updated_by="followup",
+                source="continuous-transition-cached-closeout-none",
+            )
+            if not bootstrap.get("ok", False):
+                defer_followup_retry(
+                    config,
+                    followup,
+                    reason=str(bootstrap.get("deferred_reason", "") or "successor_bootstrap_failed"),
+                    retry_after_seconds=int(
+                        followup.get("interval_seconds", DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS)
+                        or DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS
+                    ),
+                    message_path=str(cached_message_path),
+                )
+                processed.append(
+                    {
+                        "followup_key": followup_key,
+                        "action": "continuous_transition_cached_successor_bootstrap_retry_scheduled",
+                        "signal": cached_signal,
+                    }
+                )
+                return processed
+            processed.append(
+                {
+                    "followup_key": followup_key,
+                    "action": str(bootstrap.get("action", "") or "continuous_transition_cached_successor_bootstrapped"),
+                    "signal": cached_signal,
+                    "successor_session_id": bootstrap.get("successor_session_id", ""),
+                    "successor_signal": bootstrap.get("taskboard_signal", ""),
+                }
+            )
+            return processed
     if is_continuous_followup and session_id and session_has_live_task(config, session_id):
         refresh_continuous_session_for_live_tasks(
             config,
@@ -7744,11 +7812,13 @@ def find_recent_local_thread_for_prompt(
     workdir: str,
     prompt: str,
     min_updated_at: float,
+    excluded_session_ids: set[str] | None = None,
     limit: int = 20,
 ) -> dict[str, Any] | None:
     if not config.threads_db_path.exists():
         return None
     normalized_workdir = str(Path(workdir).expanduser().resolve())
+    excluded = {str(item or "").strip() for item in (excluded_session_ids or set()) if str(item or "").strip()}
     min_updated_at_seconds = max(0, int(math.floor(float(min_updated_at or 0.0))) - 5)
     conn = sqlite3.connect(config.threads_db_path)
     conn.row_factory = sqlite3.Row
@@ -7765,7 +7835,7 @@ def find_recent_local_thread_for_prompt(
         ).fetchall()
     finally:
         conn.close()
-    candidates = [dict(row) for row in rows]
+    candidates = [dict(row) for row in rows if str(row["id"] or "").strip() not in excluded]
     for candidate in candidates:
         if local_interactive_prompt_matches(prompt, str(candidate.get("first_user_message", ""))):
             return candidate
@@ -7898,6 +7968,7 @@ def run_local_interactive_codex(
                     workdir=normalized_workdir,
                     prompt=prompt,
                     min_updated_at=command_started_at,
+                    excluded_session_ids={normalized_requested_session_id},
                 )
                 if thread is not None:
                     normalized_session_id = str(thread.get("id", "")).strip()
@@ -7942,6 +8013,7 @@ def run_local_interactive_codex(
                 workdir=normalized_workdir,
                 prompt=prompt,
                 min_updated_at=command_started_at,
+                excluded_session_ids={normalized_requested_session_id},
             )
             if thread is not None:
                 normalized_session_id = str(thread.get("id", "")).strip()
@@ -8742,12 +8814,12 @@ def build_continuous_planning_prompt(
         [
             "",
             (
-                "当前要把精力放在复审继承边界、刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+                "当前要把精力放在复审继承边界、刷新 proposal 和准备首个能区分关键解释的实验包，而不是继续证明上一轮已经结束。"
                 if successor_bootstrap and normalized_trigger_signal == "none"
                 else (
                     f"上一轮信号: TASKBOARD_SIGNAL={normalized_trigger_signal}。"
                     if normalized_trigger_signal
-                    else "当前要把精力放在复审继承边界、刷新 proposal 和准备首个验证包，而不是继续证明上一轮已经结束。"
+                    else "当前要把精力放在复审继承边界、刷新 proposal 和准备首个能区分关键解释的实验包，而不是继续证明上一轮已经结束。"
                 )
             ),
         ]
@@ -8762,7 +8834,7 @@ def build_continuous_planning_prompt(
         [
             "",
             "taskboard 使用说明：",
-            "- planning 不要停在“材料差一点”。当前上下文里还能补齐的审计、配置和 smoke 前置，就直接补齐。",
+            "- planning 不要停在“材料差一点”。当前上下文里能完成的继承复审、文献/官方参数核对、配置落盘、smoke 前置和实验包整理，就直接补齐；目标是让下一轮证据可用。",
             f"- 当 proposal 和首批实验包已经准备到可执行、可审计、可分发时，输出 `TASKBOARD_SIGNAL={EXECUTION_READY_SIGNAL}`。",
             f"- 如果你已经在这一轮里提交了 live task 并开始等待回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`。",
         ]
@@ -9240,6 +9312,7 @@ def bootstrap_successor_session_after_closeout(
         log_path=log_path,
         model=str(bootstrap_spec.get("model", "")).strip(),
         spec=bootstrap_spec,
+        requested_session_id=normalized_predecessor_session_id,
     )
     completed = bootstrap_run.get("completed")
     stdout_tail = str(getattr(completed, "stdout", "") or "")
@@ -9265,6 +9338,9 @@ def bootstrap_successor_session_after_closeout(
     }
     if not bootstrap_ok or not successor_session_id:
         result["deferred_reason"] = "successor_bootstrap_failed"
+        return result
+    if successor_session_id == normalized_predecessor_session_id:
+        result["deferred_reason"] = "successor_bootstrap_reused_predecessor_session"
         return result
 
     cutover = perform_session_cutover(

@@ -1,4 +1,5 @@
 import subprocess
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from codex_taskboard.cli import (
     AppConfig,
+    find_recent_local_thread_for_prompt,
     latest_session_activity_ts,
     resume_codex_session,
     resume_codex_session_with_prompt,
@@ -34,7 +36,70 @@ def build_config(app_home: Path) -> AppConfig:
     )
 
 
+def write_thread_row(config: AppConfig, session_id: str, **fields: object) -> None:
+    config.codex_home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(config.threads_db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT,
+                source TEXT,
+                archived INTEGER,
+                updated_at INTEGER,
+                title TEXT,
+                cwd TEXT,
+                first_user_message TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO threads (id, model_provider, source, archived, updated_at, title, cwd, first_user_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                str(fields.get("model_provider", "openai")),
+                str(fields.get("source", "vscode")),
+                int(fields.get("archived", 0) or 0),
+                int(fields.get("updated_at", 1710812345) or 0),
+                str(fields.get("title", "")),
+                str(fields.get("cwd", "")),
+                str(fields.get("first_user_message", "")),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class ResumeTests(unittest.TestCase):
+    def test_find_recent_local_thread_does_not_bind_excluded_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            workdir = Path(tmpdir) / "project"
+            workdir.mkdir()
+            write_thread_row(
+                config,
+                "session-old-001",
+                cwd=str(workdir),
+                updated_at=2000,
+                first_user_message="old closeout prompt",
+                title="old closeout",
+            )
+
+            matched = find_recent_local_thread_for_prompt(
+                config,
+                workdir=str(workdir),
+                prompt="successor planning prompt",
+                min_updated_at=2000,
+                excluded_session_ids={"session-old-001"},
+            )
+
+            self.assertIsNone(matched)
+
     def test_session_output_busy_snapshot_detects_open_rollout_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = build_config(Path(tmpdir))

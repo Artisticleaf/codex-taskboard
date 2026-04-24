@@ -24,7 +24,10 @@ from codex_taskboard.cli import (
     continuous_research_session_state,
     clear_reflow_backlog,
     extract_taskboard_protocol_footer,
+    followup_key_for,
+    followup_message_path,
     followup_path,
+    process_single_followup,
     reflow_backlog_summary,
     resolve_api_service_port,
     stable_default_api_port,
@@ -95,6 +98,13 @@ class FollowupTests(unittest.TestCase):
 
         self.assertIn("现在处于 planning 阶段", prompt)
         self.assertIn("先做继承审计，不要急着开新题", prompt)
+        self.assertIn("围绕 `project_history_file` 描述的主线科研目标", prompt)
+        self.assertIn("当前主线处于什么科研阶段", prompt)
+        self.assertIn("先做主线定位", prompt)
+        self.assertIn("有顶刊/顶会潜力的模型或方法", prompt)
+        self.assertIn("创新点必须从我们自己的证据里长出来", prompt)
+        self.assertIn("首批实验包如何最大区分几种竞争解释", prompt)
+        self.assertIn("创新点要讲清它来自哪条内部证据", prompt)
         self.assertIn("TASKBOARD_SIGNAL=EXECUTION_READY", prompt)
 
     def test_build_continuous_execution_prompt_keeps_unified_context(self) -> None:
@@ -112,7 +122,9 @@ class FollowupTests(unittest.TestCase):
         )
 
         self.assertIn("现在处于 execution 阶段", prompt)
-        self.assertIn("根据 `project_history_file` 和当前 `proposal_file` 的规划推进工作", prompt)
+        self.assertIn("持续推进 `project_history_file` 描述的主线科研目标", prompt)
+        self.assertIn("如何改变我们对模型/方法性能、机制、可解释性、优势、不足或论文级证据链的判断", prompt)
+        self.assertIn("它支持或削弱了当前 proposal 的哪条科学假设", prompt)
         self.assertIn("这一轮默认在同一个 execution 上下文里完成", prompt)
         self.assertIn("TASKBOARD_SIGNAL=WAITING_ON_ASYNC", prompt)
 
@@ -176,6 +188,9 @@ class FollowupTests(unittest.TestCase):
 
         self.assertIn("现在处于 closeout 阶段", prompt)
         self.assertIn("closeout 初审", prompt)
+        self.assertIn("面向主线目标的综合分析", prompt)
+        self.assertIn("框架/方法完成度如何", prompt)
+        self.assertIn("核心创新点、优势、不足", prompt)
         self.assertIn("强制开启新的 Codex session", prompt)
         self.assertIn("proposal、history、handoff 三个入口分别是哪一份文件", prompt)
 
@@ -197,6 +212,72 @@ class FollowupTests(unittest.TestCase):
         self.assertIn("强制创建的新 Codex session", prompt)
         self.assertIn("上一轮已收口的 session", prompt)
         self.assertIn("这个新 session 的特殊任务，是先复审上一轮 closeout 的可靠性", prompt)
+
+    def test_continuous_transition_consumes_cached_none_without_resuming_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            spec = {
+                "task_id": "task-closeout-001",
+                "task_key": "task-closeout",
+                "codex_session_id": "session-old-001",
+                "agent_name": "research-agent",
+            }
+            followup_key = followup_key_for(spec)
+            followup = {
+                "version": 1,
+                "followup_key": followup_key,
+                "followup_type": "continuous_research_closeout_transition",
+                "task_id": "task-closeout-001",
+                "task_key": "task-closeout",
+                "execution_mode": "shell",
+                "codex_session_id": "session-old-001",
+                "agent_name": "research-agent",
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "closeout_proposal_dir": "/tmp/closeout",
+                "closeout_proposal_dir_source": "explicit",
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "workdir": "/tmp/project",
+                "reason": "continuous_research_closeout_transition",
+                "created_at": "2026-04-24T00:00:00+08:00",
+                "check_after_ts": 0,
+                "interval_seconds": 300,
+                "min_idle_seconds": 0,
+                "nudge_count": 0,
+                "stopped": False,
+                "last_signal": "",
+                "codex_exec_mode": "dangerous",
+                "resume_timeout_seconds": 3600,
+                "fallback_provider": "",
+                "prompt_max_chars": 12000,
+            }
+            message_path = followup_message_path(config, followup_key)
+            message_path.parent.mkdir(parents=True, exist_ok=True)
+            message_path.write_text(
+                "closeout done\nTASKBOARD_SIGNAL=none\nTASKBOARD_SELF_CHECK=pass\nLIVE_TASK_STATUS=none\n",
+                encoding="utf-8",
+            )
+
+            with patch("codex_taskboard.cli.resume_codex_session_with_prompt") as resume_mock:
+                with patch(
+                    "codex_taskboard.cli.bootstrap_successor_session_after_closeout",
+                    return_value={
+                        "ok": True,
+                        "action": "successor_bootstrap_execution_scheduled",
+                        "successor_session_id": "session-new-001",
+                        "taskboard_signal": "EXECUTION_READY",
+                    },
+                ) as bootstrap_mock:
+                    processed = process_single_followup(config, followup)
+
+            resume_mock.assert_not_called()
+            bootstrap_mock.assert_called_once()
+            self.assertEqual(bootstrap_mock.call_args.kwargs["predecessor_session_id"], "session-old-001")
+            self.assertEqual(bootstrap_mock.call_args.kwargs["trigger_signal"], "none")
+            self.assertEqual(processed[-1]["action"], "successor_bootstrap_execution_scheduled")
+            self.assertEqual(processed[-1]["successor_session_id"], "session-new-001")
 
     def test_managed_mode_only_becomes_active_after_explicit_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

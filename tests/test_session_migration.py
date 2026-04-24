@@ -479,6 +479,87 @@ class SessionMigrationTests(unittest.TestCase):
             self.assertEqual(migration["state"], "completed")
             self.assertEqual(migration["to_session_id"], "session-new-001")
 
+    def test_successor_bootstrap_rejects_reused_predecessor_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            base_spec = {
+                "task_id": "task-main-001",
+                "task_key": "task-main",
+                "codex_session_id": "session-old-001",
+                "agent_name": "toposem-agent",
+                "proposal_path": "/home/Awei/project/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "closeout_proposal_dir": "/home/Awei/project/closeout",
+                "closeout_proposal_dir_source": "explicit",
+                "project_history_file": "/home/Awei/project/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "feedback_mode": "auto",
+                "codex_exec_mode": "dangerous",
+                "workdir": "/home/Awei/project",
+                "command": "python train.py",
+                "execution_mode": "shell",
+                "resume_timeout_seconds": 3600,
+                "prompt_max_chars": 12000,
+                "fallback_provider": "",
+            }
+            write_task_spec(config, "task-main-001", dict(base_spec))
+            write_task_state(
+                config,
+                "task-main-001",
+                {
+                    "version": 1,
+                    "task_id": "task-main-001",
+                    "task_key": "task-main",
+                    "status": "completed",
+                    "feedback_mode": "auto",
+                    "agent_name": "toposem-agent",
+                    "codex_session_id": "session-old-001",
+                    "submitted_at": "2026-03-20T00:00:00Z",
+                    "updated_at": "2026-03-20T00:00:00Z",
+                },
+            )
+
+            def fake_bootstrap(
+                _config: AppConfig,
+                *,
+                mode: str,
+                prompt: str,
+                output_last_message_path: str,
+                requested_session_id: str = "",
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                self.assertEqual(mode, "exec")
+                self.assertEqual(requested_session_id, "session-old-001")
+                self.assertIn("强制创建的新 Codex session", prompt)
+                Path(output_last_message_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(output_last_message_path).write_text(
+                    "wrongly reused old session\nTASKBOARD_SIGNAL=EXECUTION_READY\nTASKBOARD_SELF_CHECK=pass\nLIVE_TASK_STATUS=none\n",
+                    encoding="utf-8",
+                )
+                return {
+                    "completed": subprocess.CompletedProcess(args=["codex"], returncode=0, stdout="", stderr=""),
+                    "session_id": "session-old-001",
+                    "message_written": True,
+                    "last_message_text": Path(output_last_message_path).read_text(encoding="utf-8"),
+                    "continue_attempts": 0,
+                    "recovered_with_continue": False,
+                }
+
+            with patch("codex_taskboard.cli.run_codex_prompt_with_continue_recovery", side_effect=fake_bootstrap):
+                result = bootstrap_successor_session_after_closeout(
+                    config,
+                    task_id="task-main-001",
+                    spec=base_spec,
+                    predecessor_session_id="session-old-001",
+                    updated_by="test",
+                    source="unit",
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["deferred_reason"], "successor_bootstrap_reused_predecessor_session")
+            self.assertEqual(session_migration_entry(config, "session-old-001"), {})
+
 
 if __name__ == "__main__":
     unittest.main()
