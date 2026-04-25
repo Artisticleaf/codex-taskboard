@@ -11,6 +11,7 @@
 - closeout `none` 触发 successor bootstrap：transition、误留在 reminder 上的 closeout `none`、以及 protocol repair 中带 closeout phase 的 `none` 都会调用 `bootstrap_successor_session_after_closeout()`。
 - closeout 状态优先于 next bounded action：dispatcher 在确保 continuous reminder 时，如果 session 已处于 closeout/pending transition，会调度 closeout transition，而不是按 stale next action 发 execution prompt。
 - successor 切换后重置 session phase：bootstrap 完成 cutover 后，会按 successor 的 signal 写回新 session 的 planning/execution/closeout 状态，避免把 predecessor 的 closeout phase 迁移成新 session 的默认阶段。
+- successor bootstrap 兼容本机 Codex interactive duplicate：如果 `codex exec` 先记录了一个无 assistant 输出的临时 thread、随后真正完成的 thread 才写入 rollout，taskboard 会按同一 prompt 与启动时间回扫最近 thread，优先采用带 assistant/protocol footer 的 successor，即使 tmux 被关闭导致 returncode 为 `1` 也不会误判失败。
 - dashboard 增加 `Active Sessions` 小栏：展示 automation/followup/task/current-thread 合并得到的 session id、managed/continuous 状态、phase、last signal、followup type、next resume 和 cwd。
 - protocol footer 解析支持显式 `effective_research_phase=closeout`，用于识别 closeout repair / closeout none 的边界场景。
 
@@ -22,6 +23,8 @@
 - protocol repair 中回复 `effective_research_phase=closeout` + `TASKBOARD_SIGNAL=none` 时，仍 bootstrap successor。
 - 普通 execution reminder 回复 `TASKBOARD_SIGNAL=none` 且没有 closeout 证据时，仍按 terminal none 清理绑定。
 - session state 已是 closeout / `last_signal=CLOSEOUT_READY` 时，next bounded action 不会把旧 session 拉回 execution。
+- local interactive 先命中空 duplicate thread、真正 successor thread 稍后完成时，会跳过空 thread 并恢复到带 assistant message 的新 thread。
+- successor bootstrap 已拿到 `EXECUTION_READY` assistant message 但 interactive exec returncode 非 0 时，只要 session id 是新 session 且 protocol footer 有效，仍会完成 cutover。
 - dashboard 在没有 task 条目的情况下仍能显示 active/bound session id。
 
 ## 验证
@@ -30,7 +33,7 @@
 - `tests/test_dashboard.py`
 - `tests/test_automation_state.py`
 - `tests/test_session_migration.py`
-- 全量：`.venv/bin/python -m pytest -q`，结果 `191 passed`。
+- 全量：`.venv/bin/python -m pytest -q`，结果 `193 passed`。
 
 ## 本地上线记录
 

@@ -7958,8 +7958,30 @@ def find_recent_local_thread_for_prompt(
     excluded_session_ids: set[str] | None = None,
     limit: int = 20,
 ) -> dict[str, Any] | None:
+    candidates = recent_local_thread_candidates_for_prompt(
+        config,
+        workdir=workdir,
+        prompt=prompt,
+        min_updated_at=min_updated_at,
+        excluded_session_ids=excluded_session_ids,
+        limit=limit,
+        include_single_unmatched=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def recent_local_thread_candidates_for_prompt(
+    config: AppConfig,
+    *,
+    workdir: str,
+    prompt: str,
+    min_updated_at: float,
+    excluded_session_ids: set[str] | None = None,
+    limit: int = 20,
+    include_single_unmatched: bool = False,
+) -> list[dict[str, Any]]:
     if not config.threads_db_path.exists():
-        return None
+        return []
     normalized_workdir = str(Path(workdir).expanduser().resolve())
     excluded = {str(item or "").strip() for item in (excluded_session_ids or set()) if str(item or "").strip()}
     min_updated_at_seconds = max(0, int(math.floor(float(min_updated_at or 0.0))) - 5)
@@ -7979,14 +8001,56 @@ def find_recent_local_thread_for_prompt(
     finally:
         conn.close()
     candidates = [dict(row) for row in rows if str(row["id"] or "").strip() not in excluded]
+    ranked: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for candidate in candidates:
         if local_interactive_prompt_matches(prompt, str(candidate.get("first_user_message", ""))):
-            return candidate
+            session_id = str(candidate.get("id", "")).strip()
+            if session_id and session_id not in seen:
+                ranked.append(candidate)
+                seen.add(session_id)
     for candidate in candidates:
         if local_interactive_prompt_matches(prompt, str(candidate.get("title", ""))):
-            return candidate
-    if len(candidates) == 1:
-        return candidates[0]
+            session_id = str(candidate.get("id", "")).strip()
+            if session_id and session_id not in seen:
+                ranked.append(candidate)
+                seen.add(session_id)
+    if include_single_unmatched and not ranked and len(candidates) == 1:
+        ranked.append(candidates[0])
+    return ranked
+
+
+def find_recent_local_thread_with_assistant_message(
+    config: AppConfig,
+    *,
+    workdir: str,
+    prompt: str,
+    min_updated_at: float,
+    min_message_ts: float,
+    excluded_session_ids: set[str] | None = None,
+    limit: int = 20,
+) -> tuple[dict[str, Any], str] | None:
+    candidates = recent_local_thread_candidates_for_prompt(
+        config,
+        workdir=workdir,
+        prompt=prompt,
+        min_updated_at=min_updated_at,
+        excluded_session_ids=excluded_session_ids,
+        limit=limit,
+        include_single_unmatched=True,
+    )
+    for candidate in candidates:
+        candidate_session_id = str(candidate.get("id", "")).strip()
+        if not candidate_session_id:
+            continue
+        message = latest_local_assistant_message_for_session(
+            config,
+            candidate_session_id,
+            min_mtime=min_message_ts,
+            min_entry_ts=min_message_ts,
+        )
+        if message:
+            return candidate, message
     return None
 
 
@@ -8094,6 +8158,39 @@ def run_local_interactive_codex(
         if tmux_session_exists(config, tmux_session_name) and tmux_session_attached_count(config, tmux_session_name) == 0:
             tmux_kill_session(config, tmux_session_name)
 
+    def return_success(captured_session_id: str, captured_message: str) -> dict[str, Any]:
+        message_path.write_text(captured_message, encoding="utf-8")
+        close_tmux_if_safe()
+        completed = subprocess.CompletedProcess(command, 0, last_pane_text, "")
+        return {
+            "completed": completed,
+            "session_id": captured_session_id,
+            "message_written": True,
+            "last_message_text": captured_message,
+        }
+
+    def find_matching_thread_message() -> tuple[str, str]:
+        if mode == "resume":
+            return "", ""
+        match = find_recent_local_thread_with_assistant_message(
+            config,
+            workdir=normalized_workdir,
+            prompt=prompt,
+            min_updated_at=command_started_at,
+            min_message_ts=command_started_at,
+            excluded_session_ids={normalized_requested_session_id},
+        )
+        if match is None:
+            return "", ""
+        thread, message = match
+        matched_session_id = str(thread.get("id", "")).strip()
+        if matched_session_id and matched_session_id != normalized_session_id:
+            append_log(
+                log_path,
+                f"local_interactive_session_recovered tmux_session={tmux_session_name} from_session_id={normalized_session_id} to_session_id={matched_session_id}",
+            )
+        return matched_session_id, message
+
     try:
         while time.time() < deadline:
             pane_text = tmux_capture_pane_text(config, tmux_session_name)
@@ -8123,15 +8220,11 @@ def run_local_interactive_codex(
                     min_entry_ts=command_started_at,
                 )
                 if last_message_text:
-                    message_path.write_text(last_message_text, encoding="utf-8")
-                    close_tmux_if_safe()
-                    completed = subprocess.CompletedProcess(command, 0, last_pane_text, "")
-                    return {
-                        "completed": completed,
-                        "session_id": normalized_session_id,
-                        "message_written": True,
-                        "last_message_text": last_message_text,
-                    }
+                    return return_success(normalized_session_id, last_message_text)
+            recovered_session_id, recovered_message = find_matching_thread_message()
+            if recovered_session_id and recovered_message:
+                normalized_session_id = recovered_session_id
+                return return_success(normalized_session_id, recovered_message)
             detected_error = local_interactive_error_text(last_pane_text)
             if detected_error and local_interactive_prompt_is_idle(last_pane_text):
                 append_log(
@@ -8168,15 +8261,11 @@ def run_local_interactive_codex(
                 min_entry_ts=command_started_at,
             )
             if last_message_text:
-                message_path.write_text(last_message_text, encoding="utf-8")
-                close_tmux_if_safe()
-                completed = subprocess.CompletedProcess(command, 0, last_pane_text, "")
-                return {
-                    "completed": completed,
-                    "session_id": normalized_session_id,
-                    "message_written": True,
-                    "last_message_text": last_message_text,
-                }
+                return return_success(normalized_session_id, last_message_text)
+        recovered_session_id, recovered_message = find_matching_thread_message()
+        if recovered_session_id and recovered_message:
+            normalized_session_id = recovered_session_id
+            return return_success(normalized_session_id, recovered_message)
         timed_out = time.time() >= deadline
         append_log(
             log_path,
@@ -9500,6 +9589,7 @@ def bootstrap_successor_session_after_closeout(
         predecessor_session_id=normalized_predecessor_session_id,
         trigger_signal=trigger_signal,
     )
+    bootstrap_started_at = time.time()
     bootstrap_run = run_codex_prompt_with_continue_recovery(
         config,
         mode="exec",
@@ -9519,6 +9609,24 @@ def bootstrap_successor_session_after_closeout(
     last_message_text = str(bootstrap_run.get("last_message_text", "") or "")
     if not last_message_text and output_path.exists():
         last_message_text = output_path.read_text(encoding="utf-8", errors="ignore")
+    initial_signal_value = canonicalize_taskboard_signal(extract_taskboard_signal(last_message_text))
+    if not last_message_text or not initial_signal_value:
+        fallback_match = find_recent_local_thread_with_assistant_message(
+            config,
+            workdir=str(bootstrap_spec.get("workdir", "")).strip() or os.getcwd(),
+            prompt=prompt,
+            min_updated_at=bootstrap_started_at,
+            min_message_ts=bootstrap_started_at,
+            excluded_session_ids={normalized_predecessor_session_id},
+        )
+        if fallback_match is not None:
+            fallback_thread, fallback_message = fallback_match
+            fallback_signal = canonicalize_taskboard_signal(extract_taskboard_signal(fallback_message))
+            if fallback_message and (not last_message_text or fallback_signal):
+                last_message_text = fallback_message
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(last_message_text, encoding="utf-8")
+                bootstrap_run["session_id"] = str(fallback_thread.get("id", "")).strip()
     signal_source = last_message_text or f"{stdout_tail}\n{stderr_tail}"
     successor_session_id = str(bootstrap_run.get("session_id", "") or extract_codex_session_id(signal_source)).strip()
     signal_value = canonicalize_taskboard_signal(extract_taskboard_signal(signal_source))

@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -66,6 +67,66 @@ def cli_args(config: AppConfig, **overrides: object) -> argparse.Namespace:
     }
     payload.update(overrides)
     return argparse.Namespace(**payload)
+
+
+def write_thread_row(config: AppConfig, session_id: str, **fields: object) -> None:
+    config.codex_home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(config.threads_db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT,
+                source TEXT,
+                archived INTEGER,
+                updated_at INTEGER,
+                title TEXT,
+                cwd TEXT,
+                first_user_message TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO threads (id, model_provider, source, archived, updated_at, title, cwd, first_user_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                str(fields.get("model_provider", "openai")),
+                str(fields.get("source", "cli")),
+                int(fields.get("archived", 0) or 0),
+                int(fields.get("updated_at", 1710812345) or 0),
+                str(fields.get("title", "")),
+                str(fields.get("cwd", "")),
+                str(fields.get("first_user_message", "")),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def write_rollout_message(config: AppConfig, session_id: str, message: str, *, timestamp: str = "1970-01-01T00:02:00Z") -> None:
+    rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
+    rollout_dir.mkdir(parents=True, exist_ok=True)
+    rollout_path = rollout_dir / f"rollout-2026-03-19T00-00-00-{session_id}.jsonl"
+    rollout_path.write_text(
+        json.dumps(
+            {
+                "timestamp": timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": message}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 class SessionMigrationTests(unittest.TestCase):
@@ -478,6 +539,124 @@ class SessionMigrationTests(unittest.TestCase):
             migration = session_migration_entry(config, "session-old-001")
             self.assertEqual(migration["state"], "completed")
             self.assertEqual(migration["to_session_id"], "session-new-001")
+
+    def test_successor_bootstrap_recovers_completed_duplicate_thread_after_nonzero_exec_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            workdir = Path(tmpdir) / "project"
+            workdir.mkdir()
+            base_spec = {
+                "task_id": "task-main-001",
+                "task_key": "task-main",
+                "codex_session_id": "session-old-001",
+                "agent_name": "toposem-agent",
+                "proposal_path": str(workdir / "PLAN.md"),
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "closeout_proposal_dir": str(workdir / "closeout"),
+                "closeout_proposal_dir_source": "explicit",
+                "project_history_file": str(workdir / "HISTORY.md"),
+                "project_history_file_source": "explicit",
+                "feedback_mode": "auto",
+                "codex_exec_mode": "dangerous",
+                "workdir": str(workdir),
+                "command": "python train.py",
+                "execution_mode": "shell",
+                "resume_timeout_seconds": 3600,
+                "prompt_max_chars": 12000,
+                "fallback_provider": "",
+            }
+            write_task_spec(config, "task-main-001", dict(base_spec))
+            write_task_state(
+                config,
+                "task-main-001",
+                {
+                    "version": 1,
+                    "task_id": "task-main-001",
+                    "task_key": "task-main",
+                    "status": "completed",
+                    "feedback_mode": "auto",
+                    "agent_name": "toposem-agent",
+                    "codex_session_id": "session-old-001",
+                    "submitted_at": "2026-03-20T00:00:00Z",
+                    "updated_at": "2026-03-20T00:00:00Z",
+                },
+            )
+            set_continuous_research_mode(
+                config,
+                enabled=True,
+                codex_session_id="session-old-001",
+                updated_by="test",
+                source="unit",
+            )
+
+            def fake_bootstrap(
+                _config: AppConfig,
+                *,
+                mode: str,
+                prompt: str,
+                output_last_message_path: str,
+                workdir: str,
+                requested_session_id: str = "",
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                del _config, output_last_message_path
+                self.assertEqual(mode, "exec")
+                self.assertEqual(requested_session_id, "session-old-001")
+                write_thread_row(
+                    config,
+                    "session-empty-001",
+                    cwd=workdir,
+                    updated_at=120,
+                    first_user_message=prompt,
+                    title=prompt,
+                )
+                write_thread_row(
+                    config,
+                    "session-new-001",
+                    cwd=workdir,
+                    updated_at=121,
+                    first_user_message=prompt,
+                    title=prompt,
+                )
+                write_rollout_message(
+                    config,
+                    "session-new-001",
+                    "successor planning done\nTASKBOARD_SIGNAL=EXECUTION_READY\nTASKBOARD_SELF_CHECK=pass\nLIVE_TASK_STATUS=none\n",
+                    timestamp="1970-01-01T00:02:01Z",
+                )
+                return {
+                    "completed": subprocess.CompletedProcess(args=["codex"], returncode=1, stdout="", stderr=""),
+                    "session_id": "session-empty-001",
+                    "message_written": False,
+                    "last_message_text": "",
+                    "continue_attempts": 0,
+                    "recovered_with_continue": False,
+                }
+
+            with patch("codex_taskboard.cli.time.time", return_value=100.0), patch(
+                "codex_taskboard.cli.run_codex_prompt_with_continue_recovery",
+                side_effect=fake_bootstrap,
+            ), patch("codex_taskboard.cli.codex_session_exists_for_spec", return_value=True), patch(
+                "codex_taskboard.cli.signal_process_group"
+            ), patch(
+                "codex_taskboard.cli.pid_exists", return_value=False
+            ):
+                result = bootstrap_successor_session_after_closeout(
+                    config,
+                    task_id="task-main-001",
+                    spec=base_spec,
+                    predecessor_session_id="session-old-001",
+                    updated_by="test",
+                    source="unit",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["successor_session_id"], "session-new-001")
+            self.assertEqual(result["completed_returncode"], 1)
+            self.assertEqual(result["taskboard_signal"], "EXECUTION_READY")
+            self.assertEqual(load_task_spec(config, "task-main-001")["codex_session_id"], "session-new-001")
+            self.assertIn("EXECUTION_READY", task_last_message_path(config, "task-main-001").read_text(encoding="utf-8"))
 
     def test_successor_bootstrap_rejects_reused_predecessor_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

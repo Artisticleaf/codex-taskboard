@@ -1,4 +1,5 @@
 import subprocess
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from codex_taskboard.cli import (
     AppConfig,
     find_recent_local_thread_for_prompt,
+    find_recent_local_thread_with_assistant_message,
     latest_session_activity_ts,
     resume_codex_session,
     resume_codex_session_with_prompt,
@@ -99,6 +101,66 @@ class ResumeTests(unittest.TestCase):
             )
 
             self.assertIsNone(matched)
+
+    def test_find_recent_local_thread_with_assistant_message_skips_empty_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            workdir = Path(tmpdir) / "project"
+            workdir.mkdir()
+            prompt = "successor planning prompt"
+            write_thread_row(
+                config,
+                "session-empty-001",
+                cwd=str(workdir),
+                updated_at=120,
+                first_user_message=prompt,
+                title=prompt,
+            )
+            write_thread_row(
+                config,
+                "session-ready-001",
+                cwd=str(workdir),
+                updated_at=110,
+                first_user_message=prompt,
+                title=prompt,
+            )
+            rollout_dir = config.codex_home / "sessions" / "2026" / "03" / "19"
+            rollout_dir.mkdir(parents=True, exist_ok=True)
+            rollout_path = rollout_dir / "rollout-2026-03-19T00-00-00-session-ready-001.jsonl"
+            rollout_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "1970-01-01T00:02:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "ready\nTASKBOARD_SIGNAL=EXECUTION_READY\nTASKBOARD_SELF_CHECK=pass\nLIVE_TASK_STATUS=none\n",
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            matched = find_recent_local_thread_with_assistant_message(
+                config,
+                workdir=str(workdir),
+                prompt=prompt,
+                min_updated_at=100,
+                min_message_ts=100,
+            )
+
+            self.assertIsNotNone(matched)
+            assert matched is not None
+            thread, message = matched
+            self.assertEqual(thread["id"], "session-ready-001")
+            self.assertIn("EXECUTION_READY", message)
 
     def test_session_output_busy_snapshot_detects_open_rollout_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
