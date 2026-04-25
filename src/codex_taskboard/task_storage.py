@@ -144,11 +144,11 @@ def write_task_state(config: Any, task_id: str, state: dict[str, Any], *, hooks:
     hooks.update_task_index_entry(config.app_home, task_dir=path.parent, root_path=path.parent.parent)
 
 
-def merge_task_state(config: Any, task_id: str, *, hooks: TaskStorageHooks, updated_at: str, **updates: Any) -> dict[str, Any]:
-    state = load_task_state(config, task_id, hooks=hooks)
+def merge_task_state(config: Any, task_id_value: str, *, hooks: TaskStorageHooks, updated_at: str, **updates: Any) -> dict[str, Any]:
+    state = load_task_state(config, task_id_value, hooks=hooks)
     state.update(updates)
     state["updated_at"] = updated_at
-    write_task_state(config, task_id, state, hooks=hooks)
+    write_task_state(config, task_id_value, state, hooks=hooks)
     return state
 
 

@@ -603,7 +603,7 @@ def infer_taskboard_research_phase(
     step_class: str = "",
     final_signal: str = "",
 ) -> str:
-    normalized_phase = str(explicit_phase or "").strip()
+    normalized_phase = str(explicit_phase or "").strip().lower()
     if normalized_phase in TASKBOARD_RESEARCH_PHASE_VALUES:
         return normalized_phase
     normalized_signal = canonicalize_taskboard_signal(final_signal)
@@ -2014,7 +2014,6 @@ def session_continuation_hint(
     now_ts: float | None = None,
 ) -> dict[str, Any]:
     anchor_spec = spec or latest_continuous_research_anchor_spec(config, session_id, states=states) or {}
-    history_hint = recent_project_history_next_action_hint(anchor_spec, now_ts=now_ts)
     evidence_hint = recent_local_evidence_sweep_hint(
         config,
         session_id,
@@ -2024,26 +2023,41 @@ def session_continuation_hint(
     )
     if evidence_hint.get("action_text"):
         return evidence_hint
-    if history_hint.get("action_text") and str(history_hint.get("status", "")) not in {"missing", "stale"}:
-        return history_hint
+    # The canonical head is the authoritative session memory.  History-log
+    # snapshots can contain older "Next bounded action" sections below a fresh
+    # canonical head; prefer the head so a closed proposal is not revived by a
+    # stale log paragraph.
     canonical_hint = canonical_head_next_action_hint(anchor_spec, now_ts=now_ts)
     if canonical_hint.get("action_text"):
         return canonical_hint
+    history_hint = recent_project_history_next_action_hint(anchor_spec, now_ts=now_ts)
+    if history_hint.get("action_text") and str(history_hint.get("status", "")) not in {"missing", "stale"}:
+        return history_hint
     if history_hint.get("action_text"):
         return history_hint
     return empty_continuation_hint()
+
+
+def session_stage_task_id(session_id: str) -> str:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return ""
+    digest = hashlib.sha1(f"{normalized_session_id}::session_stage".encode("utf-8")).hexdigest()[:12]
+    return normalize_task_id(f"session-stage-{digest}")
 
 
 def controller_continuation_hint_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
     hint = spec.get("controller_continuation_hint", {})
     if isinstance(hint, dict) and hint.get("action_text"):
         return hint
-    history_hint = recent_project_history_next_action_hint(spec)
-    if history_hint.get("action_text") and str(history_hint.get("status", "")) not in {"missing", "stale"}:
-        return history_hint
+    # See session_continuation_hint: canonical heads are authoritative over
+    # sidecar logs, which may preserve obsolete historical sections.
     canonical_hint = canonical_head_next_action_hint(spec)
     if canonical_hint.get("action_text"):
         return canonical_hint
+    history_hint = recent_project_history_next_action_hint(spec)
+    if history_hint.get("action_text") and str(history_hint.get("status", "")) not in {"missing", "stale"}:
+        return history_hint
     if history_hint.get("action_text"):
         return history_hint
     return empty_continuation_hint()
@@ -2773,7 +2787,7 @@ def execution_followthrough_instruction_lines(
     if str(spec.get("project_history_file", "")).strip():
         submit_args.append("project_history_file")
     lines = ["", "taskboard 使用说明："]
-    lines.append("- 当前上下文里还能做完的 CPU-only 工作，优先继续做完，不要为了 signal 人为拆轮。")
+    lines.append("- 当前上下文里还能做完的本机短工作，优先继续做完；本机短 CPU/GPU smoke 和正式实验直接用终端跑完、吸收、分析，不要为了 signal 或 taskboard 提交人为拆轮。")
     submit_line = submit_binding_instruction_line(spec, submit_args=submit_args)
     if submit_line:
         lines.append(f"- {submit_line}")
@@ -2781,7 +2795,7 @@ def execution_followthrough_instruction_lines(
         lines.append("- 当前是 managed 模式：taskboard 只托管任务和积压回流，不会自动再把同一对话拆成额外短步骤。")
     else:
         lines.append(
-            f"- 如果本轮只剩等待受托管实验回流，就输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`；taskboard 会按 1 小时节奏提醒你回来确认实验仍在产出。"
+            f"- 只有本轮确实已提交受托管任务并只剩等待回流时，才输出 `TASKBOARD_SIGNAL={WAITING_ON_ASYNC_SIGNAL}`；taskboard 会按 1 小时节奏提醒你回来确认实验仍在产出。"
         )
     return lines
 
@@ -2798,7 +2812,7 @@ def submit_binding_instruction_line(spec: dict[str, Any], *, submit_args: list[s
     if not bound_args:
         return ""
     return (
-        "提交新任务时显式传入 "
+        "只有确实需要 taskboard 托管时才提交新任务；提交时显式传入 "
         + "、".join(bound_args)
         + "，并用 `codex-taskboard status --json` 校验 `proposal_path` 与 live 状态。"
     )
@@ -4161,6 +4175,10 @@ def merge_continuous_research_session_state(left: dict[str, Any], right: dict[st
         ),
         "last_signal": str(right_state.get("last_signal", "")).strip() or str(left_state.get("last_signal", "")).strip(),
         "research_phase": str(right_state.get("research_phase", "")).strip() or str(left_state.get("research_phase", "")).strip(),
+        "closeout_transition_pending": bool(
+            right_state.get("closeout_transition_pending", False)
+            or left_state.get("closeout_transition_pending", False)
+        ),
         "next_action_hash": str(right_state.get("next_action_hash", "")).strip()
         or str(left_state.get("next_action_hash", "")).strip(),
         "next_action_text": str(right_state.get("next_action_text", "")).strip()
@@ -5329,6 +5347,9 @@ def write_task_state(config: AppConfig, task_id: str, state: dict[str, Any]) -> 
 
 
 def merge_task_state(config: AppConfig, task_id: str, **updates: Any) -> dict[str, Any]:
+    normalized_task_id = normalize_task_id(str(task_id or "").strip())
+    if normalized_task_id and "task_id" not in updates:
+        updates["task_id"] = normalized_task_id
     return merge_task_state_impl(config, task_id, hooks=task_storage_hooks(), updated_at=utc_now(), **updates)
 
 
@@ -5412,6 +5433,14 @@ def schedule_continuous_session_reminder(
 ) -> None:
     task_id = normalize_task_id(str(spec.get("task_id", "")).strip())
     normalized_session_id = str(session_id or spec.get("codex_session_id", "")).strip()
+    if not task_id and normalized_session_id:
+        task_id = session_stage_task_id(normalized_session_id)
+        spec = {
+            **spec,
+            "task_id": task_id,
+            "task_key": str(spec.get("task_key", "")).strip() or task_id,
+            "execution_mode": str(spec.get("execution_mode", "")).strip() or "session_stage",
+        }
     if not task_id or not normalized_session_id:
         return
     schedule_followup(
@@ -5488,11 +5517,29 @@ def schedule_continuous_transition_followup(
         return
     payload["followup_type"] = CONTINUOUS_RESEARCH_TRANSITION_FOLLOWUP_TYPE
     payload["last_signal"] = str(trigger_signal or "").strip()
+    payload["research_phase"] = "closeout"
     payload["updated_at"] = utc_now()
     atomic_write_json(target_path, payload)
+    transition_session_id = str(spec.get("codex_session_id", "") or (followup or {}).get("codex_session_id", "")).strip()
+    if transition_session_id:
+        update_continuous_research_session_state(
+            config,
+            codex_session_id=transition_session_id,
+            updated_by="followup",
+            source="continuous-transition-scheduled",
+            waiting_state="",
+            waiting_reason="",
+            waiting_since="",
+            waiting_evidence_token="",
+            research_phase="closeout",
+            closeout_transition_pending=True,
+            last_signal=str(trigger_signal or "").strip(),
+        )
     merge_task_state(
         config,
         task_id,
+        research_phase="closeout",
+        session_flow_state="closeout_transition_pending",
         followup_status="scheduled",
         followup_last_signal=str(trigger_signal or "").strip(),
         followup_last_action=f"scheduled:{CONTINUOUS_RESEARCH_TRANSITION_REASON}",
@@ -5933,6 +5980,8 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                     last_signal=cached_signal,
                     updated_by="followup",
                     source="continuous-transition-cached-closeout",
+                    research_phase="closeout",
+                    closeout_transition_pending=True,
                 )
             task_id = normalize_task_id(str(followup.get("task_id", "")).strip())
             append_followup_event_log(
@@ -6191,6 +6240,8 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                 last_signal=signal_value,
                 updated_by="followup",
                 source="continuous-transition",
+                research_phase="closeout",
+                closeout_transition_pending=True,
             )
         if signal_value == CONTINUOUS_RESEARCH_NEW_TASK_SIGNAL and result.get("ok", False):
             sync_followup_state(
@@ -6434,11 +6485,89 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                 }
             )
             return processed
+        terminal_session_id = str(followup.get("codex_session_id", "")).strip()
+        closeout_none_context = bool(
+            terminal_session_id
+            and followup_has_closeout_completion_context(
+                config,
+                followup,
+                spec=spec_for_resume,
+                protocol_footer=protocol_footer,
+            )
+            and continuous_research_mode_enabled(config, codex_session_id=terminal_session_id)
+        )
+        if closeout_none_context:
+            bootstrap_task_id = task_id or session_stage_task_id(terminal_session_id)
+            bootstrap_spec = dict(spec_for_resume)
+            if bootstrap_task_id:
+                bootstrap_spec["task_id"] = bootstrap_task_id
+                bootstrap_spec["task_key"] = str(bootstrap_spec.get("task_key", "")).strip() or bootstrap_task_id
+            if terminal_session_id:
+                clear_continuous_research_session_waiting_state(
+                    config,
+                    codex_session_id=terminal_session_id,
+                    evidence_token=continuous_research_session_evidence_token(config, terminal_session_id, spec=bootstrap_spec),
+                    last_signal=signal_value,
+                    updated_by="followup",
+                    source="continuous-closeout-none",
+                    research_phase="closeout",
+                    closeout_transition_pending=True,
+                )
+            bootstrap = bootstrap_successor_session_after_closeout(
+                config,
+                task_id=bootstrap_task_id,
+                spec=bootstrap_spec,
+                predecessor_session_id=terminal_session_id,
+                resolve_followup_key=followup_key,
+                trigger_signal=signal_value,
+                updated_by="followup",
+                source="continuous-closeout-none",
+            )
+            if not bootstrap.get("ok", False):
+                defer_followup_retry(
+                    config,
+                    followup,
+                    reason=str(bootstrap.get("deferred_reason", "") or "successor_bootstrap_failed"),
+                    retry_after_seconds=int(
+                        followup.get("interval_seconds", DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS)
+                        or DEFAULT_CONTINUOUS_RESEARCH_INTERVAL_SECONDS
+                    ),
+                    message_path=str(msg_path),
+                )
+                processed.append(
+                    {
+                        "followup_key": followup_key,
+                        "action": "continuous_closeout_none_successor_bootstrap_retry_scheduled",
+                        "signal": signal_value,
+                    }
+                )
+                return processed
+            processed.append(
+                {
+                    "followup_key": followup_key,
+                    "action": str(bootstrap.get("action", "") or "continuous_closeout_none_successor_bootstrapped"),
+                    "signal": signal_value,
+                    "successor_session_id": bootstrap.get("successor_session_id", ""),
+                    "successor_signal": bootstrap.get("taskboard_signal", ""),
+                }
+            )
+            return processed
+        if terminal_session_id and (is_continuous_session_reminder or is_continuous_followup):
+            clear_continuous_research_mode_session(
+                config,
+                codex_session_id=terminal_session_id,
+                updated_by="followup",
+                source="continuous-session-terminal-none",
+            )
         sync_followup_state(
             config,
             followup,
             followup_status="resolved",
-            followup_last_action="resolved_signal_none",
+            followup_last_action=(
+                "resolved_signal_none_terminal_session"
+                if terminal_session_id and (is_continuous_session_reminder or is_continuous_followup)
+                else "resolved_signal_none"
+            ),
             followup_last_signal=signal_value,
             followup_stopped_at=utc_now(),
             notification_signal=signal_value,
@@ -6451,7 +6580,11 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                 task_id,
                 followup_status="resolved",
                 followup_last_signal=signal_value,
-                followup_last_action="resolved_signal_none",
+                followup_last_action=(
+                    "resolved_signal_none_terminal_session"
+                    if terminal_session_id and (is_continuous_session_reminder or is_continuous_followup)
+                    else "resolved_signal_none"
+                ),
                 followup_stopped_at=utc_now(),
                 followup_last_message_path=str(msg_path),
                 notification_signal=signal_value,
@@ -6559,20 +6692,30 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
             )
             return processed
         if is_continuous_session_reminder:
-            followup["check_after_ts"] = time.time() + DEFAULT_CONTINUOUS_RESEARCH_DELAY_SECONDS
-            followup["last_signal"] = signal_value
-            followup["last_action"] = f"scheduled:{CONTINUOUS_RESEARCH_IDLE_REASON}"
-            updated_at = utc_now()
-            followup["last_checked_at"] = updated_at
-            followup["updated_at"] = updated_at
-            atomic_write_json(followup_path(config, followup_key), followup)
-            append_followup_event_log(
-                config,
-                event="scheduled",
-                reason=CONTINUOUS_RESEARCH_IDLE_REASON,
-                followup=followup,
-                detail="continuous_session_reminder_rescheduled",
-            )
+            if task_id and should_schedule_followup_for_spec(spec_for_resume):
+                schedule_continuous_transition_followup(
+                    config,
+                    task_id=task_id,
+                    spec=spec_for_resume,
+                    trigger_signal=signal_value,
+                    message_path=str(msg_path),
+                    followup=followup,
+                )
+            else:
+                followup["check_after_ts"] = time.time() + DEFAULT_CONTINUOUS_RESEARCH_DELAY_SECONDS
+                followup["last_signal"] = signal_value
+                followup["last_action"] = f"deferred:{CONTINUOUS_RESEARCH_TRANSITION_REASON}"
+                updated_at = utc_now()
+                followup["last_checked_at"] = updated_at
+                followup["updated_at"] = updated_at
+                atomic_write_json(followup_path(config, followup_key), followup)
+                append_followup_event_log(
+                    config,
+                    event="deferred",
+                    reason=CONTINUOUS_RESEARCH_TRANSITION_REASON,
+                    followup=followup,
+                    detail="continuous_session_transition_deferred_without_task_binding",
+                )
             if task_id:
                 merge_task_state(
                     config,
@@ -6580,10 +6723,10 @@ def process_single_followup(config: AppConfig, followup: dict[str, Any]) -> list
                     notification_signal=signal_value,
                     followup_status="scheduled",
                     followup_last_signal=signal_value,
-                    followup_last_action=f"scheduled:{CONTINUOUS_RESEARCH_IDLE_REASON}",
+                    followup_last_action=f"scheduled:{CONTINUOUS_RESEARCH_TRANSITION_REASON}",
                     followup_last_message_path=str(msg_path),
                 )
-            processed.append({"followup_key": followup_key, "action": "continuous_session_reminder_rescheduled", "signal": signal_value})
+            processed.append({"followup_key": followup_key, "action": "continuous_session_transition_scheduled", "signal": signal_value})
             return processed
         if task_id and should_schedule_followup_for_spec(spec_for_resume):
             schedule_continuous_transition_followup(
@@ -8537,7 +8680,15 @@ def extract_taskboard_protocol_footer(text: str) -> dict[str, Any]:
     signal_value = canonicalize_taskboard_signal(str(payload.get("TASKBOARD_SIGNAL", "")).strip())
     self_check = str(payload.get("TASKBOARD_SELF_CHECK", "")).strip()
     live_task_status = str(payload.get("LIVE_TASK_STATUS", "")).strip()
-    effective_research_phase = infer_taskboard_research_phase(final_signal=signal_value)
+    explicit_research_phase = str(
+        payload.get("effective_research_phase", "")
+        or payload.get("TASKBOARD_RESEARCH_PHASE", "")
+        or payload.get("RESEARCH_PHASE", "")
+    ).strip()
+    effective_research_phase = infer_taskboard_research_phase(
+        explicit_phase=explicit_research_phase,
+        final_signal=signal_value,
+    )
     valid = bool(
         signal_value in TASKBOARD_PUBLIC_SIGNAL_VALUES
         and self_check in {"pass", "fail"}
@@ -8545,6 +8696,7 @@ def extract_taskboard_protocol_footer(text: str) -> dict[str, Any]:
     )
     return {
         "effective_research_phase": effective_research_phase,
+        "explicit_research_phase": explicit_research_phase,
         "self_check": self_check,
         "live_task_status": live_task_status,
         "signal": signal_value,
@@ -8584,11 +8736,58 @@ def protocol_footer_snapshot(protocol: dict[str, Any] | None) -> dict[str, Any]:
     payload = protocol if isinstance(protocol, dict) else {}
     return {
         "effective_research_phase": str(payload.get("effective_research_phase", "")).strip(),
+        "explicit_research_phase": str(payload.get("explicit_research_phase", "")).strip(),
         "signal": str(payload.get("signal", "")).strip(),
         "self_check": str(payload.get("self_check", "")).strip(),
         "live_task_status": str(payload.get("live_task_status", "")).strip(),
         "valid": bool(payload.get("valid", False)),
     }
+
+
+def protocol_research_phase(protocol: dict[str, Any] | None) -> str:
+    payload = protocol if isinstance(protocol, dict) else {}
+    return infer_taskboard_research_phase(
+        explicit_phase=str(
+            payload.get("effective_research_phase", "")
+            or payload.get("explicit_research_phase", "")
+        ).strip(),
+        final_signal=str(payload.get("signal", "")).strip(),
+    )
+
+
+def followup_has_closeout_completion_context(
+    config: AppConfig,
+    followup: dict[str, Any],
+    *,
+    spec: dict[str, Any] | None = None,
+    protocol_footer: dict[str, Any] | None = None,
+) -> bool:
+    """Detect a closeout-completed none even if the followup was not converted."""
+    payload = followup if isinstance(followup, dict) else {}
+    resume_spec = spec if isinstance(spec, dict) else {}
+    followup_type = str(payload.get("followup_type", "")).strip()
+    if followup_type == CONTINUOUS_RESEARCH_TRANSITION_FOLLOWUP_TYPE:
+        return True
+    phases = [
+        str(payload.get("research_phase", "")).strip().lower(),
+        protocol_research_phase(protocol_footer),
+        protocol_research_phase(payload.get("protocol_footer", {}) if isinstance(payload.get("protocol_footer", {}), dict) else {}),
+    ]
+    session_id = str(payload.get("codex_session_id", "") or resume_spec.get("codex_session_id", "")).strip()
+    session_state = continuous_research_session_state(config, session_id) if session_id else {}
+    if session_state:
+        phases.append(str(session_state.get("research_phase", "")).strip().lower())
+        if bool(session_state.get("closeout_transition_pending", False)):
+            return True
+    if "closeout" in phases:
+        return True
+    signals = [
+        str(payload.get("last_signal", "")).strip(),
+        str(payload.get("protocol_observed_signal", "")).strip(),
+        str(session_state.get("last_signal", "")).strip() if session_state else "",
+        str(session_state.get("waiting_state", "")).strip() if session_state else "",
+    ]
+    return any(canonicalize_taskboard_signal(item) == CLOSEOUT_READY_SIGNAL for item in signals)
 
 
 def parse_json_line(text: str) -> dict[str, Any]:
@@ -9376,6 +9575,24 @@ def bootstrap_successor_session_after_closeout(
         "closeout_session_cutover": True,
         "taskboard_signal": signal_value,
     }
+    successor_phase = (
+        "planning"
+        if signal_value in {"", "none"}
+        else infer_taskboard_research_phase(final_signal=signal_value)
+    )
+    update_continuous_research_session_state(
+        config,
+        codex_session_id=successor_session_id,
+        updated_by=updated_by,
+        source=f"{source}:successor-state" if source else "successor-bootstrap-state",
+        waiting_state=WAITING_ON_ASYNC_SIGNAL if signal_value == WAITING_ON_ASYNC_SIGNAL else "",
+        waiting_reason=WAITING_ON_ASYNC_REASON if signal_value == WAITING_ON_ASYNC_SIGNAL else "",
+        waiting_since=bootstrap_finished_at if signal_value == WAITING_ON_ASYNC_SIGNAL else "",
+        waiting_evidence_token="",
+        research_phase=successor_phase,
+        closeout_transition_pending=(signal_value == CLOSEOUT_READY_SIGNAL),
+        last_signal=signal_value,
+    )
 
     if signal_value == "none":
         protocol_issue = "successor_bootstrap_missing_transition_signal"
@@ -10467,9 +10684,10 @@ def latest_continuous_research_anchor_spec(
         session_state = continuous_research_session_state(config, normalized_session_id)
         if not session_state:
             return None
+        fallback_task_id = session_stage_task_id(normalized_session_id)
         fallback_spec = {
-            "task_id": "",
-            "task_key": "",
+            "task_id": fallback_task_id,
+            "task_key": fallback_task_id,
             "codex_session_id": normalized_session_id,
             "agent_name": str(session_state.get("agent_name", "")).strip(),
             "workdir": str(session_state.get("bound_workdir", "")).strip(),
@@ -10762,6 +10980,7 @@ def build_continuous_mode_status_payload(
     resolved_session_id = str(target_session_id or payload.get("target_codex_session_id", "")).strip()
     states = iter_all_task_states(config)
     followups = load_followups(config)
+    active_sessions = collect_active_session_entries(config, states, followups=followups)
     target_state = payload.get("target_session_state", {})
     if not isinstance(target_state, dict):
         target_state = {}
@@ -10875,6 +11094,7 @@ def build_continuous_mode_status_payload(
         **payload,
         "target_codex_session_id": resolved_session_id,
         "target_session_state": enriched_target_state,
+        "active_sessions": active_sessions,
         "resolved_from": resolved_from,
         "effective_wait_state": effective_wait_state,
         "effective_last_signal": effective_last_signal,
@@ -11063,6 +11283,52 @@ def ensure_continuous_research_session_reminders(config: AppConfig) -> list[dict
         waiting_state = canonicalize_taskboard_signal(str(session_state.get("waiting_state", "")).strip())
         if waiting_state == "none":
             waiting_state = ""
+        if followup_has_closeout_completion_context(
+            config,
+            {
+                "followup_type": CONTINUOUS_SESSION_REMINDER_FOLLOWUP_TYPE,
+                "codex_session_id": session_id,
+                "last_signal": str(session_state.get("last_signal", "")).strip(),
+                "research_phase": str(session_state.get("research_phase", "")).strip(),
+                "protocol_footer": {},
+            },
+            spec=anchor_spec,
+        ):
+            transition_task_id = normalize_task_id(str(anchor_spec.get("task_id", "")).strip()) or session_stage_task_id(session_id)
+            transition_spec = {
+                **anchor_spec,
+                "task_id": transition_task_id,
+                "task_key": str(anchor_spec.get("task_key", "")).strip() or transition_task_id,
+                "codex_session_id": session_id,
+            }
+            trigger_signal = canonicalize_taskboard_signal(str(session_state.get("last_signal", "")).strip()) or CLOSEOUT_READY_SIGNAL
+            schedule_continuous_transition_followup(
+                config,
+                task_id=transition_task_id,
+                spec=transition_spec,
+                trigger_signal=trigger_signal if trigger_signal != "none" else CLOSEOUT_READY_SIGNAL,
+                followup={
+                    "followup_key": continuous_session_followup_key_for(session_id),
+                    "codex_session_id": session_id,
+                },
+            )
+            live_followups.append(
+                {
+                    "followup_key": continuous_session_followup_key_for(session_id),
+                    "followup_type": CONTINUOUS_RESEARCH_TRANSITION_FOLLOWUP_TYPE,
+                    "codex_session_id": session_id,
+                }
+            )
+            processed.append(
+                {
+                    "session_id": session_id,
+                    "task_id": transition_task_id,
+                    "followup_key": continuous_session_followup_key_for(session_id),
+                    "action": "continuous_closeout_transition_scheduled",
+                    "reason": CONTINUOUS_RESEARCH_TRANSITION_REASON,
+                }
+            )
+            continue
         next_action_hint = session_continuation_hint(config, session_id, spec=anchor_spec, states=states)
         anchor_spec_with_hint = {
             **anchor_spec,
@@ -14954,6 +15220,154 @@ def join_dashboard_columns(items: list[str], *, columns: int, width: int, gap: i
     return lines
 
 
+def collect_active_session_entries(
+    config: AppConfig,
+    states: list[dict[str, Any]],
+    *,
+    followups: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    mode_payload = load_continuous_research_mode(config)
+    sessions = mode_payload.get("sessions", {}) if isinstance(mode_payload.get("sessions", {}), dict) else {}
+    default_session_id = str(mode_payload.get("default_codex_session_id", "")).strip()
+    followup_items = list(followups) if followups is not None else load_followups(config)
+    rows: dict[str, dict[str, Any]] = {}
+
+    def ensure_row(session_id: str) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id not in rows:
+            rows[normalized_session_id] = {
+                "session_id": normalized_session_id,
+                "mode": "unbound",
+                "enabled": False,
+                "default": normalized_session_id == default_session_id,
+                "phase": "",
+                "last_signal": "",
+                "followup_key": "",
+                "followup_type": "",
+                "followup_reason": "",
+                "next_resume_at": "",
+                "workdir": "",
+                "updated_at": "",
+                "source": "",
+                "origin": "",
+            }
+        return rows[normalized_session_id]
+
+    for session_id, raw_state in sessions.items():
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            continue
+        state = raw_state if isinstance(raw_state, dict) else {}
+        row = ensure_row(normalized_session_id)
+        row.update(
+            {
+                "mode": str(state.get("mode", "")).strip() or ("continuous" if bool(state.get("enabled", False)) else "managed"),
+                "enabled": bool(state.get("enabled", False)),
+                "default": normalized_session_id == default_session_id,
+                "phase": effective_research_phase_for_session(state),
+                "last_signal": str(state.get("last_signal", "")).strip(),
+                "workdir": str(state.get("bound_workdir", "") or state.get("workdir", "")).strip(),
+                "updated_at": str(state.get("updated_at", "")).strip(),
+                "source": str(state.get("source", "")).strip(),
+                "origin": "automation",
+            }
+        )
+
+    for followup in followup_items:
+        session_id = str(followup.get("codex_session_id", "")).strip()
+        if not session_id:
+            continue
+        row = ensure_row(session_id)
+        next_ts = 0.0
+        try:
+            next_ts = float(followup.get("check_after_ts", 0) or 0)
+        except (TypeError, ValueError):
+            next_ts = 0.0
+        row.update(
+            {
+                "followup_key": str(followup.get("followup_key", "")).strip(),
+                "followup_type": str(followup.get("followup_type", "")).strip(),
+                "followup_reason": str(followup.get("reason", "")).strip(),
+                "next_resume_at": format_unix_timestamp(next_ts) if next_ts > 0 else "",
+                "workdir": row.get("workdir") or str(followup.get("workdir", "")).strip(),
+                "updated_at": row.get("updated_at") or str(followup.get("updated_at", "")).strip(),
+                "origin": row.get("origin") or "followup",
+            }
+        )
+
+    for state in states:
+        session_id = str(state.get("codex_session_id", "") or state.get("resumed_session_id", "")).strip()
+        if not session_id:
+            continue
+        task_is_relevant = (
+            str(state.get("status", "")).strip() in ACTIVE_TASK_STATUSES
+            or str(state.get("followup_status", "")).strip() == "scheduled"
+            or bool(state.get("pending_feedback", False))
+        )
+        if not task_is_relevant and session_id not in rows:
+            continue
+        row = ensure_row(session_id)
+        row.update(
+            {
+                "workdir": row.get("workdir") or str(state.get("workdir", "")).strip(),
+                "updated_at": row.get("updated_at") or str(state.get("updated_at", "")).strip(),
+                "last_signal": row.get("last_signal") or str(state.get("followup_last_signal", "") or state.get("taskboard_signal", "")).strip(),
+                "origin": row.get("origin") or "task",
+            }
+        )
+
+    current = current_thread_info(config)
+    if current:
+        session_id = str(current.get("current_codex_session_id", "")).strip()
+        if session_id:
+            row = ensure_row(session_id)
+            row.update(
+                {
+                    "workdir": row.get("workdir") or str(current.get("cwd", "") or current.get("cwd_probe", "")).strip(),
+                    "updated_at": row.get("updated_at") or str(current.get("updated_at_iso", "")).strip(),
+                    "origin": row.get("origin") or "current",
+                }
+            )
+
+    def sort_key(item: dict[str, Any]) -> tuple[int, int, int, float, str]:
+        updated_ts = parse_timestamp_to_unix(str(item.get("updated_at", "")).strip()) or 0.0
+        return (
+            0 if bool(item.get("default", False)) else 1,
+            0 if bool(item.get("enabled", False)) else 1,
+            0 if str(item.get("followup_key", "")).strip() else 1,
+            -updated_ts,
+            str(item.get("session_id", "")),
+        )
+
+    return sorted((row for row in rows.values() if str(row.get("session_id", "")).strip()), key=sort_key)
+
+
+def build_active_session_lines(entries: list[dict[str, Any]], *, width: int, limit: int = 4) -> list[str]:
+    lines = ["Active Sessions"]
+    if not entries:
+        lines.append("  (no bound or live Codex session records)")
+        return lines
+    for entry in entries[: max(1, limit)]:
+        session_id = str(entry.get("session_id", "")).strip()
+        mode = str(entry.get("mode", "")).strip() or "unbound"
+        state_text = "continuous" if bool(entry.get("enabled", False)) else "managed"
+        default_marker = "*" if bool(entry.get("default", False)) else "-"
+        phase = str(entry.get("phase", "")).strip() or "-"
+        signal = str(entry.get("last_signal", "")).strip() or "-"
+        followup_type = str(entry.get("followup_type", "")).strip() or "-"
+        next_resume_at = dashboard_short_time(str(entry.get("next_resume_at", "")).strip()) if str(entry.get("next_resume_at", "")).strip() else "-"
+        workdir = str(entry.get("workdir", "")).strip() or "-"
+        lines.append(
+            dashboard_trim(
+                f"  {default_marker} {session_id} mode={mode}/{state_text} phase={phase} signal={signal} followup={followup_type} next={next_resume_at} cwd={workdir}",
+                width - 1,
+            )
+        )
+    if len(entries) > limit:
+        lines.append(f"  ... {len(entries) - limit} more session(s)")
+    return lines
+
+
 def build_gpu_snapshot_lines(gpu_rows: list[dict[str, Any]], *, width: int) -> list[str]:
     lines = ["GPU Snapshot"]
     if not gpu_rows:
@@ -15173,6 +15587,7 @@ def collect_dashboard_snapshot(
     gpu_rows = get_gpu_summary_table()
     total_gpu_slots = detect_gpu_count() or len(gpu_rows)
     followups = followup_map_by_task_id(config)
+    all_followups = load_followups(config)
     pending_feedback_count = sum(1 for item in states if item.get("pending_feedback", False))
     latest_states_index = latest_task_states_by_key(states)
     enriched_states = [
@@ -15190,6 +15605,7 @@ def collect_dashboard_snapshot(
     resolved_process_panel_mode = dashboard_process_panel_mode(process_panel_mode, height)
     process_limit = 4 if height >= 34 else 2
     process_hints = list_external_process_hints(process_limit, mode=resolved_process_panel_mode)
+    active_sessions = collect_active_session_entries(config, states, followups=all_followups)
     return {
         "counts": counts,
         "running_live": running_live,
@@ -15199,6 +15615,7 @@ def collect_dashboard_snapshot(
         "gpu_rows": gpu_rows,
         "total_gpu_slots": total_gpu_slots,
         "followups": followups,
+        "active_sessions": active_sessions,
         "pending_feedback_count": pending_feedback_count,
         "enriched_states": enriched_states,
         "process_hints": process_hints,
@@ -15227,6 +15644,7 @@ def build_dashboard_view_from_snapshot(
     gpu_rows = list(snapshot["gpu_rows"])
     total_gpu_slots = int(snapshot["total_gpu_slots"])
     followups = dict(snapshot["followups"])
+    active_sessions = list(snapshot.get("active_sessions", []))
     pending_feedback_count = int(snapshot["pending_feedback_count"])
     enriched_states = list(snapshot["enriched_states"])
     process_hints = list(snapshot["process_hints"])
@@ -15252,6 +15670,7 @@ def build_dashboard_view_from_snapshot(
             width - 1,
         ),
     ]
+    active_session_lines = build_active_session_lines(active_sessions, width=width)
     gpu_lines = build_gpu_snapshot_lines(gpu_rows, width=width)
     process_lines = build_process_hint_lines(process_hints, width=width)
     task_entries = build_dashboard_task_entries(
@@ -15291,6 +15710,7 @@ def build_dashboard_view_from_snapshot(
         process_hint_note = ["External Process Hints", "  (no matching external GPU/training processes in current heuristic scan)"]
     return {
         "header_lines": header_lines,
+        "active_session_lines": active_session_lines,
         "gpu_lines": gpu_lines,
         "process_lines": process_lines or process_hint_note,
         "task_header": task_header,
@@ -15350,6 +15770,8 @@ def format_dashboard_task_entry(entry: dict[str, Any], *, selected: bool = False
 
 def dashboard_lines_from_view(view: dict[str, Any], *, width: int) -> list[str]:
     lines = list(view["header_lines"])
+    lines.append("")
+    lines.extend(view.get("active_session_lines", []))
     lines.append("")
     lines.extend(view["gpu_lines"])
     if view["process_lines"]:

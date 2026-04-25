@@ -21,17 +21,23 @@ from codex_taskboard.cli import (
     build_successor_bootstrap_prompt,
     build_standard_followup_prompt,
     command_enter_stage,
+    continuous_session_followup_key_for,
     continuous_research_session_state,
     clear_reflow_backlog,
     extract_taskboard_protocol_footer,
     followup_key_for,
     followup_message_path,
     followup_path,
+    load_continuous_research_mode,
+    load_followups,
+    load_task_state,
+    process_followups,
     process_single_followup,
     reflow_backlog_summary,
     resolve_api_service_port,
     stable_default_api_port,
     set_automation_mode,
+    update_continuous_research_session_state,
 )
 
 
@@ -68,6 +74,22 @@ class FollowupTests(unittest.TestCase):
         self.assertTrue(protocol["valid"])
         self.assertEqual(protocol["signal"], "EXECUTION_READY")
         self.assertEqual(protocol["effective_research_phase"], "execution")
+
+    def test_extract_taskboard_protocol_footer_honors_explicit_closeout_phase_on_none(self) -> None:
+        protocol = extract_taskboard_protocol_footer(
+            "\n".join(
+                [
+                    "effective_research_phase=closeout",
+                    "TASKBOARD_SIGNAL=none",
+                    "TASKBOARD_SELF_CHECK=pass",
+                    "LIVE_TASK_STATUS=none",
+                ]
+            )
+        )
+
+        self.assertTrue(protocol["valid"])
+        self.assertEqual(protocol["signal"], "none")
+        self.assertEqual(protocol["effective_research_phase"], "closeout")
 
     def test_build_standard_followup_prompt_uses_compact_footer_contract(self) -> None:
         prompt = build_standard_followup_prompt(
@@ -126,6 +148,7 @@ class FollowupTests(unittest.TestCase):
         self.assertIn("如何改变我们对模型/方法性能、机制、可解释性、优势、不足或论文级证据链的判断", prompt)
         self.assertIn("它支持或削弱了当前 proposal 的哪条科学假设", prompt)
         self.assertIn("这一轮默认在同一个 execution 上下文里完成", prompt)
+        self.assertIn("本机短 CPU/GPU smoke 和正式实验直接用终端跑完", prompt)
         self.assertIn("TASKBOARD_SIGNAL=WAITING_ON_ASYNC", prompt)
 
     def test_build_continuous_execution_prompt_adds_repeat_guard_after_repeated_microsteps(self) -> None:
@@ -191,6 +214,7 @@ class FollowupTests(unittest.TestCase):
         self.assertIn("面向主线目标的综合分析", prompt)
         self.assertIn("框架/方法完成度如何", prompt)
         self.assertIn("核心创新点、优势、不足", prompt)
+        self.assertIn("对科研路线有指导价值的负结果必须如实写入 proposal 和 history", prompt)
         self.assertIn("强制开启新的 Codex session", prompt)
         self.assertIn("proposal、history、handoff 三个入口分别是哪一份文件", prompt)
 
@@ -279,6 +303,354 @@ class FollowupTests(unittest.TestCase):
             self.assertEqual(processed[-1]["action"], "successor_bootstrap_execution_scheduled")
             self.assertEqual(processed[-1]["successor_session_id"], "session-new-001")
 
+    def test_continuous_session_reminder_closeout_ready_becomes_transition_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            session_id = "session-closeout-reminder-001"
+            task_id = "task-closeout-reminder-001"
+            set_automation_mode(
+                config,
+                mode="continuous",
+                codex_session_id=session_id,
+                updated_by="test",
+                source="unit",
+            )
+            followup_key = continuous_session_followup_key_for(session_id)
+            followup = {
+                "version": 1,
+                "followup_key": followup_key,
+                "followup_type": "continuous_session_reminder",
+                "task_id": task_id,
+                "task_key": task_id,
+                "execution_mode": "session_stage",
+                "codex_session_id": session_id,
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "workdir": "/tmp/project",
+                "reason": "continuous_research_next_bounded_action",
+                "check_after_ts": 0,
+                "interval_seconds": 300,
+                "min_idle_seconds": 0,
+                "last_signal": "EXECUTION_READY",
+                "stopped": False,
+            }
+
+            with patch(
+                "codex_taskboard.cli.resume_codex_session_with_prompt",
+                return_value={
+                    "ok": True,
+                    "last_message_text": (
+                        "ready for closeout\n"
+                        "TASKBOARD_SIGNAL=CLOSEOUT_READY\n"
+                        "TASKBOARD_SELF_CHECK=pass\n"
+                        "LIVE_TASK_STATUS=none\n"
+                    ),
+                    "taskboard_protocol": {
+                        "valid": True,
+                        "signal": "CLOSEOUT_READY",
+                        "self_check": "pass",
+                        "live_task_status": "none",
+                    },
+                    "continue_attempts": 0,
+                },
+            ):
+                processed = process_single_followup(config, followup)
+
+            self.assertEqual(processed[-1]["action"], "continuous_session_transition_scheduled")
+            stored = load_followups(config)[0]
+            self.assertEqual(stored["followup_key"], followup_key)
+            self.assertEqual(stored["followup_type"], "continuous_research_closeout_transition")
+            self.assertEqual(stored["last_signal"], "CLOSEOUT_READY")
+
+    def test_continuous_session_reminder_closeout_none_bootstraps_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            session_id = "session-terminal-none-001"
+            task_id = "task-terminal-none-001"
+            set_automation_mode(
+                config,
+                mode="continuous",
+                codex_session_id=session_id,
+                updated_by="test",
+                source="unit",
+            )
+            followup = {
+                "version": 1,
+                "followup_key": continuous_session_followup_key_for(session_id),
+                "followup_type": "continuous_session_reminder",
+                "task_id": task_id,
+                "task_key": task_id,
+                "execution_mode": "session_stage",
+                "codex_session_id": session_id,
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "workdir": "/tmp/project",
+                "reason": "continuous_research_next_bounded_action",
+                "check_after_ts": 0,
+                "interval_seconds": 300,
+                "min_idle_seconds": 0,
+                "last_signal": "CLOSEOUT_READY",
+                "stopped": False,
+            }
+
+            with patch(
+                "codex_taskboard.cli.resume_codex_session_with_prompt",
+                return_value={
+                    "ok": True,
+                    "last_message_text": (
+                        "closeout done\n"
+                        "TASKBOARD_SIGNAL=none\n"
+                        "TASKBOARD_SELF_CHECK=pass\n"
+                        "LIVE_TASK_STATUS=none\n"
+                    ),
+                    "taskboard_protocol": {
+                        "valid": True,
+                        "signal": "none",
+                        "self_check": "pass",
+                        "live_task_status": "none",
+                    },
+                    "continue_attempts": 0,
+                },
+            ), patch(
+                "codex_taskboard.cli.bootstrap_successor_session_after_closeout",
+                return_value={
+                    "ok": True,
+                    "action": "successor_bootstrap_execution_scheduled",
+                    "successor_session_id": "session-successor-001",
+                    "taskboard_signal": "EXECUTION_READY",
+                },
+            ) as bootstrap_mock:
+                processed = process_single_followup(config, followup)
+
+            self.assertEqual(processed[-1]["action"], "successor_bootstrap_execution_scheduled")
+            self.assertEqual(processed[-1]["successor_session_id"], "session-successor-001")
+            bootstrap_mock.assert_called_once()
+            self.assertEqual(bootstrap_mock.call_args.kwargs["predecessor_session_id"], session_id)
+            self.assertEqual(bootstrap_mock.call_args.kwargs["trigger_signal"], "none")
+            self.assertTrue(load_continuous_research_mode(config, codex_session_id=session_id)["enabled"])
+
+    def test_protocol_repair_closeout_none_bootstraps_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            session_id = "session-repair-closeout-001"
+            task_id = "task-repair-closeout-001"
+            set_automation_mode(
+                config,
+                mode="continuous",
+                codex_session_id=session_id,
+                updated_by="test",
+                source="unit",
+            )
+            followup = {
+                "version": 1,
+                "followup_key": continuous_session_followup_key_for(session_id),
+                "followup_type": "protocol_self_check_repair",
+                "task_id": task_id,
+                "task_key": task_id,
+                "execution_mode": "session_stage",
+                "codex_session_id": session_id,
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "workdir": "/tmp/project",
+                "reason": "protocol_self_check_repair",
+                "protocol_footer": {
+                    "effective_research_phase": "closeout",
+                    "signal": "",
+                    "self_check": "",
+                    "live_task_status": "",
+                    "valid": False,
+                },
+                "check_after_ts": 0,
+                "interval_seconds": 300,
+                "min_idle_seconds": 0,
+                "last_signal": "",
+                "stopped": False,
+            }
+
+            with patch(
+                "codex_taskboard.cli.resume_codex_session_with_prompt",
+                return_value={
+                    "ok": True,
+                    "last_message_text": (
+                        "closeout protocol repaired\n"
+                        "effective_research_phase=closeout\n"
+                        "TASKBOARD_SIGNAL=none\n"
+                        "TASKBOARD_SELF_CHECK=pass\n"
+                        "LIVE_TASK_STATUS=none\n"
+                    ),
+                    "taskboard_protocol": {
+                        "valid": True,
+                        "signal": "none",
+                        "self_check": "pass",
+                        "live_task_status": "none",
+                        "effective_research_phase": "closeout",
+                    },
+                    "continue_attempts": 0,
+                },
+            ), patch(
+                "codex_taskboard.cli.bootstrap_successor_session_after_closeout",
+                return_value={
+                    "ok": True,
+                    "action": "successor_bootstrap_execution_scheduled",
+                    "successor_session_id": "session-successor-002",
+                    "taskboard_signal": "EXECUTION_READY",
+                },
+            ) as bootstrap_mock:
+                processed = process_single_followup(config, followup)
+
+            self.assertEqual(processed[-1]["action"], "successor_bootstrap_execution_scheduled")
+            bootstrap_mock.assert_called_once()
+
+    def test_continuous_session_reminder_plain_none_clears_session_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            session_id = "session-plain-none-001"
+            task_id = "task-plain-none-001"
+            set_automation_mode(
+                config,
+                mode="continuous",
+                codex_session_id=session_id,
+                updated_by="test",
+                source="unit",
+            )
+            followup = {
+                "version": 1,
+                "followup_key": continuous_session_followup_key_for(session_id),
+                "followup_type": "continuous_session_reminder",
+                "task_id": task_id,
+                "task_key": task_id,
+                "execution_mode": "session_stage",
+                "codex_session_id": session_id,
+                "proposal_path": "/tmp/PLAN.md",
+                "proposal_source": "explicit",
+                "proposal_owner": True,
+                "project_history_file": "/tmp/HISTORY.md",
+                "project_history_file_source": "explicit",
+                "workdir": "/tmp/project",
+                "reason": "continuous_research_next_bounded_action",
+                "check_after_ts": 0,
+                "interval_seconds": 300,
+                "min_idle_seconds": 0,
+                "last_signal": "EXECUTION_READY",
+                "stopped": False,
+            }
+
+            with patch(
+                "codex_taskboard.cli.resume_codex_session_with_prompt",
+                return_value={
+                    "ok": True,
+                    "last_message_text": (
+                        "nothing to do\n"
+                        "TASKBOARD_SIGNAL=none\n"
+                        "TASKBOARD_SELF_CHECK=pass\n"
+                        "LIVE_TASK_STATUS=none\n"
+                    ),
+                    "taskboard_protocol": {
+                        "valid": True,
+                        "signal": "none",
+                        "self_check": "pass",
+                        "live_task_status": "none",
+                    },
+                    "continue_attempts": 0,
+                },
+            ):
+                processed = process_single_followup(config, followup)
+
+            self.assertEqual(processed[-1]["action"], "resolved_signal_none")
+            self.assertFalse(load_continuous_research_mode(config, codex_session_id=session_id)["enabled"])
+            state = load_task_state(config, task_id)
+            self.assertEqual(state["followup_last_action"], "resolved_signal_none_terminal_session")
+
+    def test_closeout_session_state_schedules_transition_instead_of_execution_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_config(Path(tmpdir))
+            session_id = "session-closeout-state-001"
+            set_automation_mode(
+                config,
+                mode="continuous",
+                codex_session_id=session_id,
+                updated_by="test",
+                source="unit",
+            )
+            update_continuous_research_session_state(
+                config,
+                codex_session_id=session_id,
+                updated_by="test",
+                source="unit",
+                research_phase="closeout",
+                last_signal="CLOSEOUT_READY",
+                proposal_path="/tmp/PLAN.md",
+                proposal_source="explicit",
+                proposal_owner=True,
+                project_history_file="/tmp/HISTORY.md",
+                project_history_file_source="explicit",
+                bound_workdir="/tmp/project",
+            )
+
+            processed = process_followups(config)
+            followups = load_followups(config)
+
+            self.assertTrue(any(item["action"] == "continuous_closeout_transition_scheduled" for item in processed))
+            self.assertEqual(len(followups), 1)
+            self.assertEqual(followups[0]["followup_type"], "continuous_research_closeout_transition")
+            self.assertEqual(followups[0]["last_signal"], "CLOSEOUT_READY")
+
+    def test_canonical_head_next_step_overrides_stale_history_log_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            proposal_path = project_dir / "PROPOSAL.md"
+            proposal_path.write_text("# proposal\n", encoding="utf-8")
+            history_path = project_dir / "HISTORY.md"
+            history_path.write_text(
+                "\n".join(
+                    [
+                        "<!-- TASKBOARD_CANONICAL_HEAD_BEGIN CH1 role=project_history updated=2026-04-25 -->",
+                        "BIG_MAINLINE=main",
+                        "SMALL_MAINLINE=small",
+                        "CURRENT_BOUNDARY=boundary",
+                        "NEXT_STEP=canonical Phase16 planning entry, do not rerun old panel",
+                        "<!-- TASKBOARD_CANONICAL_HEAD_END -->",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            log_dir = project_dir / "HISTORY-logs"
+            log_dir.mkdir()
+            (log_dir / "20260425T120000+0800_before_old_hint.md").write_text(
+                "\n".join(
+                    [
+                        "created_at: 2026-04-25T12:00:00+08:00",
+                        "## Next bounded action",
+                        "- status: ready_local",
+                        "- action: stale old panel action that should not win",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            prompt = build_continuous_research_prompt(
+                {
+                    "proposal_path": str(proposal_path),
+                    "proposal_source": "explicit",
+                    "proposal_owner": True,
+                    "project_history_file": str(history_path),
+                    "project_history_file_source": "explicit",
+                },
+                trigger_signal="EXECUTION_READY",
+            )
+
+            self.assertIn("canonical Phase16 planning entry", prompt)
+            self.assertNotIn("stale old panel action", prompt)
+
     def test_managed_mode_only_becomes_active_after_explicit_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = build_config(Path(tmpdir))
@@ -340,6 +712,56 @@ class FollowupTests(unittest.TestCase):
             self.assertEqual(state["project_history_file"], str(history_path.resolve()))
             self.assertEqual(state["handoff_file"], str(handoff_path.resolve()))
             self.assertEqual(state["research_phase"], "planning")
+
+    def test_continuous_enter_stage_without_task_anchor_schedules_session_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_home = Path(tmpdir) / "taskboard-home"
+            project_dir = Path(tmpdir) / "project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            proposal_path = project_dir / "PROPOSAL.md"
+            proposal_path.write_text("# proposal\n", encoding="utf-8")
+            history_path = project_dir / "HISTORY.md"
+            history_path.write_text("# history\n", encoding="utf-8")
+            closeout_dir = project_dir / "closeout"
+            closeout_dir.mkdir(parents=True, exist_ok=True)
+            args = Namespace(
+                app_home=str(app_home),
+                codex_home=str(app_home / "codex-home"),
+                codex_bin="codex",
+                tmux_bin="tmux",
+                stage="execution",
+                codex_session_id="session-inline-001",
+                workdir=str(project_dir),
+                agent_name="",
+                proposal=str(proposal_path),
+                closeout_proposal_dir=str(closeout_dir),
+                project_history_file=str(history_path),
+                handoff_file=None,
+                trigger_signal="",
+                successor_bootstrap=False,
+                predecessor_session_id="",
+                automation_mode="continuous",
+                no_bind=False,
+                json=False,
+            )
+            config = build_config(app_home)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(command_enter_stage(args), 0)
+
+            processed = process_followups(config)
+            followups = load_followups(config)
+
+            self.assertTrue(any(item["action"] == "continuous_session_reminder_scheduled" for item in processed))
+            self.assertEqual(len(followups), 1)
+            followup = followups[0]
+            self.assertEqual(followup["followup_type"], "continuous_session_reminder")
+            self.assertEqual(followup["codex_session_id"], "session-inline-001")
+            self.assertTrue(followup["task_id"].startswith("session-stage-"))
+            state = load_task_state(config, followup["task_id"])
+            self.assertEqual(state["task_id"], followup["task_id"])
+            self.assertEqual(state["execution_mode"], "session_stage")
+            self.assertEqual(state["codex_session_id"], "session-inline-001")
+            self.assertEqual(state["proposal_path"], str(proposal_path.resolve()))
 
     def test_apply_local_submission_context_inherits_bound_stage_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -11,7 +11,7 @@
 最小规则：
 
 - 不要继续手工裸跑长任务。
-- 本地会跨回复继续运行的 CPU-only 进程：优先 `bind-before-launch`；已经启动的进程：`attach-pid`。
+- 本地会跨回复继续运行的 CPU-only 进程：优先 `bind-before-launch`；已经启动的 CPU/GPU 进程：`attach-pid`。
 - 子代理任务：用 `submit-subagent`。
 - 逻辑上同一个任务复用 `task_key`，但新的提交使用新的 `task_id`。
 - 如果 taskboard 里已经有活跃版本，不要再重复创建。

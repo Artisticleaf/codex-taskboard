@@ -60,6 +60,10 @@ def normalize_continuous_research_mode_payload(payload: Any, *, hooks: Automatio
                 "last_evidence_token": str(state.get("last_evidence_token", "")),
                 "stable_idle_repeat_count": max(0, int(state.get("stable_idle_repeat_count", 0) or 0)),
                 "research_phase": str(state.get("research_phase", "")),
+                "closeout_transition_pending": hooks.parse_boolish(
+                    state.get("closeout_transition_pending", False),
+                    default=False,
+                ),
                 "last_signal": str(state.get("last_signal", "")),
                 "next_action_hash": str(state.get("next_action_hash", "")),
                 "next_action_text": str(state.get("next_action_text", "")),

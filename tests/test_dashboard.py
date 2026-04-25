@@ -13,6 +13,7 @@ from codex_taskboard.cli import (
     build_dashboard_view_from_snapshot,
     command_automation_mode,
     command_backlog,
+    dashboard_lines_from_view,
     followup_path,
 )
 
@@ -128,6 +129,7 @@ class DashboardTests(unittest.TestCase):
                 "gpu_rows": [],
                 "total_gpu_slots": 0,
                 "followups": {},
+                "active_sessions": [],
                 "pending_feedback_count": 0,
                 "enriched_states": [],
                 "process_hints": [],
@@ -139,6 +141,46 @@ class DashboardTests(unittest.TestCase):
             header = "\n".join(view["header_lines"])
             self.assertIn("[mode continuous]", header)
             self.assertIn("[backlog 2]", header)
+
+    def test_dashboard_lines_show_active_session_without_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_home = Path(tmpdir)
+            config = build_config(app_home)
+            command_automation_mode(make_args(app_home, action="continuous", codex_session_id="session-active-001"))
+            snapshot = {
+                "counts": {"queued": 0, "submitted": 0, "completed": 0, "observed_exit": 0, "failed": 0, "terminated": 0, "launch_failed": 0},
+                "running_live": 0,
+                "active_states": [],
+                "cpu_thread_limit": 40,
+                "active_cpu_threads": 0,
+                "gpu_rows": [],
+                "total_gpu_slots": 0,
+                "followups": {},
+                "active_sessions": [
+                    {
+                        "session_id": "session-active-001",
+                        "mode": "continuous",
+                        "enabled": True,
+                        "default": True,
+                        "phase": "execution",
+                        "last_signal": "EXECUTION_READY",
+                        "followup_type": "continuous_session_reminder",
+                        "next_resume_at": "2026-04-25T18:00:00+08:00",
+                        "workdir": "/tmp/project",
+                    }
+                ],
+                "pending_feedback_count": 0,
+                "enriched_states": [],
+                "process_hints": [],
+                "process_panel_mode": "off",
+            }
+
+            view = build_dashboard_view_from_snapshot(config, snapshot, limit=20, width=140, height=30)
+            lines = "\n".join(dashboard_lines_from_view(view, width=140))
+
+            self.assertIn("Active Sessions", lines)
+            self.assertIn("session-active-001", lines)
+            self.assertIn("mode=continuous/continuous", lines)
 
 
 if __name__ == "__main__":

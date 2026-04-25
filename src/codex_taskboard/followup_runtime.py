@@ -119,6 +119,19 @@ def current_followup_resume_spec(
     current_state = hooks.load_task_state(config, task_id) or {}
     if not current_spec and not current_state:
         return spec
+    state_has_binding = any(
+        str(current_state.get(field, "")).strip()
+        for field in (
+            "codex_session_id",
+            "proposal_path",
+            "closeout_proposal_dir",
+            "project_history_file",
+            "workdir",
+            "remote_workdir",
+        )
+    )
+    if not current_spec and not state_has_binding:
+        return spec
     spec.update(
         {
             "task_id": str(current_spec.get("task_id", current_state.get("task_id", spec["task_id"]))),
@@ -462,6 +475,10 @@ def schedule_followup(
     spec = hooks.apply_session_redirect_to_spec(config, spec, include_migrating=True)
     if not should_schedule_followup_for_spec(spec):
         return
+    normalized_task_id = hooks.normalize_task_id(str(task_id or spec.get("task_id", "")).strip())
+    if not normalized_task_id:
+        return
+    task_id = normalized_task_id
     followup_key = str(followup_key_override or followup_key_for(spec)).strip()
     message_path = followup_message_path(config, followup_key)
     created_at = hooks.utc_now()
@@ -509,6 +526,19 @@ def schedule_followup(
     hooks.merge_task_state(
         config,
         task_id,
+        task_key=str(spec.get("task_key", task_id)),
+        execution_mode=str(spec.get("execution_mode", "shell")),
+        codex_session_id=str(spec.get("codex_session_id", "")),
+        agent_name=str(spec.get("agent_name", "")),
+        proposal_path=str(spec.get("proposal_path", "")),
+        proposal_source=str(spec.get("proposal_source", "")),
+        proposal_owner=bool(spec.get("proposal_owner", False)),
+        closeout_proposal_dir=str(spec.get("closeout_proposal_dir", "")),
+        closeout_proposal_dir_source=str(spec.get("closeout_proposal_dir_source", "")),
+        project_history_file=str(spec.get("project_history_file", "")),
+        project_history_file_source=str(spec.get("project_history_file_source", "")),
+        workdir=str(spec.get("workdir", "")),
+        remote_workdir=str(spec.get("remote_workdir", "")),
         followup_status="scheduled",
         followup_last_signal=str(last_signal or "").strip(),
         followup_last_action=f"scheduled:{reason}",
