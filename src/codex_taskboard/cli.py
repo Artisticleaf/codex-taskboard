@@ -14410,6 +14410,31 @@ def command_enter_stage(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_langgraph(args: argparse.Namespace) -> int:
+    from codex_taskboard.langgraph_adapter import (
+        graph_mermaid,
+        run_taskboard_langgraph,
+        snapshot_from_taskboard,
+    )
+
+    if getattr(args, "mermaid", False):
+        print(graph_mermaid())
+        return 0
+
+    state = snapshot_from_taskboard(
+        phase=str(getattr(args, "phase", "") or "").strip(),
+        signal=str(getattr(args, "signal", "") or "").strip(),
+        live_task_status=str(getattr(args, "live_task_status", "none") or "none").strip(),
+        automation_mode=str(getattr(args, "automation_mode", "managed") or "managed").strip(),
+        backlog_count=int(getattr(args, "backlog_count", 0) or 0),
+        has_live_task=bool(getattr(args, "has_live_task", False)),
+        closeout_done=bool(getattr(args, "closeout_done", False)),
+    )
+    result = run_taskboard_langgraph(state)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def safe_remove_task_dir(config: AppConfig, path: Path) -> None:
     resolved = path.resolve()
     allowed_roots = [root.resolve() for root in all_task_roots(config)]
@@ -17200,6 +17225,21 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=command_status)
+
+    langgraph = subparsers.add_parser("langgraph", help="Run the optional LangGraph view of the taskboard research workflow.")
+    langgraph.add_argument("--phase", choices=["planning", "execution", "closeout"], default="planning")
+    langgraph.add_argument(
+        "--signal",
+        choices=["EXECUTION_READY", "WAITING_ON_ASYNC", "CLOSEOUT_READY", "none"],
+        default="none",
+    )
+    langgraph.add_argument("--live-task-status", choices=["none", "submitted", "awaiting"], default="none")
+    langgraph.add_argument("--automation-mode", choices=["managed", "continuous"], default="managed")
+    langgraph.add_argument("--backlog-count", type=int, default=0)
+    langgraph.add_argument("--has-live-task", action="store_true")
+    langgraph.add_argument("--closeout-done", action="store_true")
+    langgraph.add_argument("--mermaid", action="store_true")
+    langgraph.set_defaults(func=command_langgraph)
 
     status_result = subparsers.add_parser("status-result", help="Return a structured status/result payload for one task.")
     add_config_args(status_result)
